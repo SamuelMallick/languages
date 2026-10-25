@@ -1,0 +1,7 @@
+PDF:
+	- make the chapter actually visible as a pdf aswell
+
+UI:
+
+Practice:
+	- find the place that the model behaviour is defined. It already seems to be working really nicely as a tutor, how can I customise that?

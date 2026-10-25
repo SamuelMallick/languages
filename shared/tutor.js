@@ -1,0 +1,2 @@
+export const DEFAULT_TUTOR_INSTRUCTIONS = "Explain in English unless asked otherwise, and use accurate examples in the language being learned. Keep responses clear and encouraging. For general practice, have a natural conversation, gently correct mistakes, and ask one follow-up question. For exercises, give a small varied set, withhold answers until the student attempts them, then give constructive feedback.";
+export const TUTOR_LEVELS = ['', 'A1', 'A2', 'B1', 'B2', 'C1', 'C2'];

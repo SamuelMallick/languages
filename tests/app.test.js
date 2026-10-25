@@ -1,0 +1,232 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { once } from 'node:events';
+import { get as httpGet } from 'node:http';
+import { PDFDocument, StandardFonts, PDFName, PDFString } from 'pdf-lib';
+import { createStore } from '../server/store.js';
+import { createApp } from '../server/app.js';
+import { makeIntegrations, validateLocalUrl, AppError } from '../server/integrations.js';
+import { assignRanges, extractPdf, sectionContext } from '../server/pdf.js';
+
+async function fixture(t, integrations) {
+  const directory = mkdtempSync(path.join(tmpdir(), 'lingua-test-'));
+  const store = createStore(directory);
+  const server = createApp(store, integrations).listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); store.db.close();
+    // Only remove the exact disposable directory created by this test.
+    assert.equal(path.dirname(directory), path.resolve(tmpdir()));
+    assert.ok(path.basename(directory).startsWith('lingua-test-'));
+    rmSync(directory, { recursive: true, force: true });
+  });
+  async function request(route, options = {}) {
+    const body = options.body;
+    const response = await fetch(`${base}/api${route}`, { ...options,
+      headers: body instanceof FormData ? options.headers : { 'Content-Type': 'application/json', ...options.headers },
+      ...(body !== undefined ? { body: body instanceof FormData ? body : JSON.stringify(body) } : {}),
+    });
+    return { status: response.status, data: await response.json() };
+  }
+  return { store, request, base };
+}
+
+test('per-conversation tutor settings persist, validate, and reach both providers', async t => {
+  let received;
+  const { request } = await fixture(t, { tutor: async value => { received = value; return 'Hallo'; } });
+  const first = (await request('/chats', { method: 'POST', body: { languageId: 'dutch' } })).data;
+  const second = (await request('/chats', { method: 'POST', body: { languageId: 'dutch' } })).data;
+  assert.ok(first.tutorInstructions.includes('gently correct'));
+  const body = { tutorInstructions: 'Speak Dutch and correct every mistake.', tutorLevel: 'A2' };
+  assert.equal((await request(`/chats/${first.id}/tutor`, { method: 'PATCH', body })).status, 200);
+  assert.equal((await request(`/chats/${first.id}`)).data.tutorLevel, 'A2');
+  assert.equal((await request(`/chats/${second.id}`)).data.tutorLevel, '');
+  assert.equal((await request(`/chats/${first.id}/tutor`, { method: 'PATCH', body: { ...body, tutorLevel: 'invalid' } })).status, 400);
+  assert.equal((await request(`/chats/${first.id}/tutor`, { method: 'PATCH', body: { ...body, tutorInstructions: 'x'.repeat(8001) } })).status, 400);
+  await request(`/chats/${first.id}/messages`, { method: 'POST', body: { content: 'Hallo' } });
+  assert.equal(received.tutorInstructions, body.tutorInstructions);
+  assert.equal(received.tutorLevel, 'A2');
+  let system;
+  const args = { ...received, settings: { provider: 'chatgpt' } };
+  await makeIntegrations(undefined, { respond: async payload => { system = payload.instructions; return 'ok'; } }).tutor(args);
+  assert.ok(system.includes(body.tutorInstructions)); assert.ok(system.includes('Assume CEFR level A2'));
+  await makeIntegrations(async (url, options) => { system = JSON.parse(options.body).messages[0].content; return { ok: true, json: async () => ({ message: { content: 'ok' } }) }; }).tutor({ ...args, settings: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'test' } });
+  assert.ok(system.includes(body.tutorInstructions)); assert.ok(system.includes('Assume CEFR level A2'));
+});
+
+async function samplePdf(bookmarks = false) {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  for (const text of ['Chapter 1: Dutch articles. Use de with common nouns.', 'Section 1.1: Use het with neuter nouns. Het huis means the house.', 'Chapter 2: Word order. The finite verb comes second.']) {
+    pdf.addPage([500, 700]).drawText(text, { x: 40, y: 650, size: 10, font });
+  }
+  if (bookmarks) {
+    const outline = pdf.context.obj({ Type: 'Outlines', Count: 2 });
+    const outlineRef = pdf.context.register(outline);
+    const first = pdf.context.obj({ Title: PDFString.of('Articles'), Parent: outlineRef, Dest: [pdf.getPages()[0].ref, PDFName.of('Fit')] });
+    const second = pdf.context.obj({ Title: PDFString.of('Word order'), Parent: outlineRef, Dest: [pdf.getPages()[2].ref, PDFName.of('Fit')] });
+    const firstRef = pdf.context.register(first); const secondRef = pdf.context.register(second);
+    first.set(PDFName.of('Next'), secondRef); second.set(PDFName.of('Prev'), firstRef);
+    outline.set(PDFName.of('First'), firstRef); outline.set(PDFName.of('Last'), secondRef);
+    pdf.catalog.set(PDFName.of('Outlines'), outlineRef);
+  }
+  return Buffer.from(await pdf.save());
+}
+
+test('local access protection, validation, settings secrecy, and language separation', async t => {
+  const { request, base, store } = await fixture(t);
+  const initial = await request('/bootstrap');
+  assert.deepEqual(initial.data.languages.map(l => l.name), ['Dutch', 'Turkish']);
+  assert.equal((await request('/bootstrap', { headers: { Origin: 'https://untrusted.example' } })).status, 403);
+  // Node fetch replaces Host; use the HTTP client to exercise DNS-rebinding protection.
+  const hostStatus = await new Promise((resolve, reject) => {
+    httpGet(`${base}/api/bootstrap`, { headers: { Host: 'untrusted.example' } }, response => { response.resume(); resolve(response.statusCode); }).on('error', reject);
+  });
+  assert.equal(hostStatus, 403);
+  assert.equal((await request('/languages', { method: 'POST', body: { name: '' } })).status, 400);
+  assert.equal((await request('/languages', { method: 'POST', body: { name: 'dUtCh', nativeName: 'Dutch', code: 'NL' } })).status, 409);
+  const language = await request('/languages', { method: 'POST', body: { name: 'Italian', nativeName: 'Italiano', code: 'IT' } });
+  assert.equal(language.status, 201);
+  assert.equal('level' in language.data, false);
+  assert.ok((await request('/bootstrap')).data.languages.every(l => !('level' in l)));
+  store.saveSettings({ provider: 'openai', apiKey: 'fake-test-key' });
+  assert.equal(store.settings().provider, 'chatgpt');
+  assert.equal(store.settings().apiKey, undefined);
+  assert.equal((await request('/settings', { method: 'PUT', body: { provider: 'openai', model: 'test-model', ollamaModel: 'local', ollamaUrl: 'http://127.0.0.1:11434' } })).status, 400);
+  const settings = await request('/settings', { method: 'PUT', body: { provider: 'chatgpt', chatgptModel: '', ollamaModel: 'local', ollamaUrl: 'http://127.0.0.1:11434', ankiKey: 'fake-anki-key' } });
+  assert.equal(settings.status, 200); assert.equal(settings.data.apiKey, undefined);
+  assert.equal(settings.data.hasAnkiKey, true); assert.equal(settings.data.ankiKey, undefined);
+  assert.ok(!JSON.stringify((await request('/bootstrap')).data).includes('fake-test-key'));
+  const invalid = await request('/settings', { method: 'PUT', body: { ...settings.data, ollamaUrl: 'https://external.example' } });
+  assert.equal(invalid.status, 400);
+  assert.equal((await request('/languages/turkish/chats')).data.length, 0);
+});
+
+test('PDF extraction reads real bookmarks and safely falls back to page groups', async () => {
+  const bookmarked = await extractPdf(await samplePdf(true));
+  assert.equal(bookmarked.pageCount, 3);
+  assert.equal(bookmarked.outlineSource, 'bookmarks');
+  assert.deepEqual(bookmarked.sections.map(s => [s.title, s.startPage, s.endPage]), [['Articles', 1, 2], ['Word order', 3, 3]]);
+  assert.match(bookmarked.pages[1].text, /het with neuter/);
+  const plain = await extractPdf(await samplePdf());
+  assert.equal(plain.outlineSource, 'page groups');
+  assert.equal(plain.sections[0].title, 'Pages 1–3');
+  const ranges = assignRanges([{ startPage: 1, depth: 0 }, { startPage: 2, depth: 1 }, { startPage: 4, depth: 1 }, { startPage: 8, depth: 0 }], 10);
+  assert.deepEqual(ranges.map(s => s.endPage), [7, 3, 7, 10]);
+  assert.throws(() => sectionContext({ pages: JSON.stringify([{ page: 1, text: '' }]) }, { startPage: 1, endPage: 1 }), /OCR/);
+});
+
+test('upload, selected section context, saved discussions, range edits, and cascade deletion', async t => {
+  const calls = [];
+  const { request, store } = await fixture(t, { tutor: async args => { calls.push(args); return 'Use de for common nouns (page 1).'; } });
+  const invalidForm = new FormData(); invalidForm.set('file', new Blob(['not a PDF']), 'invalid.pdf');
+  assert.equal((await request('/languages/dutch/documents', { method: 'POST', body: invalidForm })).status, 400);
+  const form = new FormData(); form.set('file', new Blob([await samplePdf(true)], { type: 'application/pdf' }), 'Dutch grammar.pdf');
+  const uploaded = await request('/languages/dutch/documents', { method: 'POST', body: form });
+  assert.equal(uploaded.status, 201);
+  const doc = uploaded.data;
+  assert.equal((await request('/languages/turkish/documents')).data.length, 0);
+  assert.equal((await request('/languages/dutch/documents')).data.length, 1);
+  assert.equal((await request('/chats', { method: 'POST', body: { languageId: 'turkish', documentId: doc.id, sectionId: doc.sections[0].id } })).status, 400);
+  const create = () => request('/chats', { method: 'POST', body: { languageId: 'dutch', documentId: doc.id, sectionId: doc.sections[0].id } });
+  const { data: chat } = await create();
+  assert.equal((await create()).data.id, chat.id);
+  const message = await request(`/chats/${chat.id}/messages`, { method: 'POST', body: { content: 'Summarize this section.' } });
+  assert.equal(message.status, 200); assert.equal(message.data.messages.length, 2);
+  assert.match(calls[0].context.text, /Page 2/); assert.doesNotMatch(calls[0].context.text, /Word order/);
+  assert.equal(calls[0].language.name, 'Dutch');
+  assert.equal((await request(`/chats/${chat.id}`)).data.messages[1].content, 'Use de for common nouns (page 1).');
+  const reopened = createStore(store.directory);
+  assert.equal(JSON.parse(reopened.get('SELECT messages FROM chats WHERE id=?', chat.id).messages).length, 2); reopened.db.close();
+  const badRange = { ...doc.sections[0], endPage: 100 };
+  assert.equal((await request(`/documents/${doc.id}`, { method: 'PATCH', body: { title: doc.title, sections: [badRange] } })).status, 400);
+  const edited = await request(`/documents/${doc.id}`, { method: 'PATCH', body: { title: doc.title, sections: doc.sections.map((s, i) => i === 0 ? { ...s, endPage: 1 } : s) } });
+  assert.equal(edited.status, 200); assert.equal((await request(`/chats/${chat.id}`)).status, 404);
+  const anotherChat = await create(); assert.notEqual(anotherChat.data.id, chat.id);
+  assert.equal((await request(`/documents/${doc.id}`, { method: 'DELETE' })).status, 200);
+  assert.equal((await request(`/chats/${anotherChat.data.id}`)).status, 404);
+});
+
+test('chat failures preserve the prior transcript and concurrent messages are rejected', async t => {
+  let reject; let mode = 'success';
+  const { request } = await fixture(t, { tutor: async () => {
+    if (mode === 'wait') return new Promise((_, no) => { reject = no; });
+    return 'Hallo! Hoe gaat het?';
+  } });
+  const { data: chat } = await request('/chats', { method: 'POST', body: { languageId: 'dutch' } });
+  await request(`/chats/${chat.id}/messages`, { method: 'POST', body: { content: 'Hallo' } });
+  mode = 'wait';
+  const inFlight = request(`/chats/${chat.id}/messages`, { method: 'POST', body: { content: 'Help me.' } });
+  while (!reject) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal((await request(`/chats/${chat.id}/messages`, { method: 'POST', body: { content: 'Duplicate' } })).status, 409);
+  assert.equal((await request(`/chats/${chat.id}`, { method: 'DELETE' })).status, 409);
+  reject(new AppError(503, 'Test provider unavailable'));
+  assert.equal((await inFlight).status, 503);
+  assert.equal((await request(`/chats/${chat.id}`)).data.messages.length, 2);
+  assert.equal((await request('/languages/turkish/chats')).data.length, 0);
+});
+
+test('Anki reviews respect scheduler order, require reveal, and reject stale or repeated ratings', async t => {
+  const actions = []; let current = { cardId: 10, question: 'hallo', answer: 'hello [anki:play:a:0]', template: 'Basic', modelName: 'Vocabulary', fields: { Audio: { value: '[sound:hello.mp3]', order: 0 } }, buttons: [1, 2, 3, 4] };
+  const { request } = await fixture(t, { anki: async (action, params) => {
+    actions.push({ action, params });
+    if (action === 'deckNames') return ['Dutch basics'];
+    if (action === 'getDeckStats') return { 1: { name: 'Dutch basics', new_count: current.cardId === 10 ? 1 : 0, learn_count: 0, review_count: 1 } };
+    if (action === 'guiDeckReview' || action === 'guiShowAnswer') return true;
+    if (action === 'guiCurrentCard') return current;
+    if (action === 'cardsInfo') {
+      assert.deepEqual(params.cards, [current.cardId]);
+      return [{ type: current.cardId === 10 ? 0 : 3, queue: current.cardId === 10 ? 0 : 1 }];
+    }
+    if (action === 'modelTemplates') return { Basic: { Front: 'hallo', Back: 'hello {{Audio}}' } };
+    if (action === 'guiAnswerCard') { current = { ...current, cardId: 11 }; return true; }
+  } });
+  assert.equal((await request('/languages/dutch/decks', { method: 'POST', body: { name: 'Dutch basics' } })).status, 201);
+  assert.equal((await request('/languages/turkish/decks')).data.length, 0);
+  const { data: start } = await request('/anki/review/start', { method: 'POST', body: { languageId: 'dutch', name: 'Dutch basics' } });
+  assert.deepEqual(start.counts, { new: 1, learning: 0, review: 1 });
+  assert.equal(start.card.category, 'new');
+  const body = { token: start.token, cardId: 10, ease: 3 };
+  assert.equal((await request('/anki/review/rate', { method: 'POST', body })).status, 400);
+  const revealed = await request('/anki/review/reveal', { method: 'POST', body });
+  assert.equal(revealed.status, 200);
+  assert.equal(revealed.data.card.category, 'new');
+  assert.deepEqual(revealed.data.card.audioFiles, { q: [], a: ['hello.mp3'] });
+  assert.deepEqual(revealed.data.counts, start.counts);
+  const rated = await request('/anki/review/rate', { method: 'POST', body });
+  assert.equal(rated.data.card.cardId, 11);
+  assert.equal(rated.data.card.category, 'learning');
+  assert.deepEqual(rated.data.counts, { new: 0, learning: 0, review: 1 });
+  assert.equal((await request('/anki/review/rate', { method: 'POST', body })).status, 409);
+  assert.equal(actions.filter(a => a.action === 'guiAnswerCard').length, 1);
+  assert.equal((await request('/bootstrap')).data.languages[0].reviews, 1);
+  current = { ...current, cardId: 99 };
+  assert.equal((await request('/anki/review/reveal', { method: 'POST', body: { token: start.token, cardId: 11 } })).status, 409);
+});
+
+test('provider adapters use documented payloads and surface connection errors', async () => {
+  const requests = [];
+  const planRequests = [];
+  const integrations = makeIntegrations(async (url, options) => {
+    requests.push({ url, ...options, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify(url.endsWith('/api/chat') ? { message: { content: 'Merhaba' } } : { output: [{ type: 'message', content: [{ type: 'output_text', text: 'Hallo' }] }] }), { status: 200 });
+  }, { respond: async request => { planRequests.push(request); return 'Hallo'; } });
+  const language = { name: 'Dutch', nativeName: 'Nederlands' };
+  const messages = [{ role: 'user', content: 'Hello' }];
+  assert.equal(await integrations.tutor({ settings: { provider: 'chatgpt', chatgptModel: 'chosen-model' }, language, messages }), 'Hallo');
+  assert.equal(planRequests[0].model, 'chosen-model');
+  assert.equal(requests.length, 0);
+  await assert.rejects(() => integrations.tutor({ settings: { provider: 'openai', apiKey: 'fake-key' }, language, messages }), /API-key billing is disabled/);
+  assert.equal(requests.length, 0);
+  assert.equal(await integrations.tutor({ settings: { provider: 'ollama', ollamaUrl: 'http://127.0.0.1:11434', ollamaModel: 'local' }, language, messages }), 'Merhaba');
+  assert.doesNotMatch(requests[0].body.messages[0].content, /CEFR|undefined/);
+  assert.equal(requests[0].body.stream, false); assert.equal(requests[0].body.messages[0].role, 'system');
+  assert.throws(() => validateLocalUrl('http://169.254.169.254'), /localhost/);
+  assert.throws(() => validateLocalUrl('http://localhost:11434/redirect'), /without a path/);
+  await assert.rejects(() => makeIntegrations().tutor({ settings: { provider: 'chatgpt' }, language, messages }), /Connect your tutor/);
+  await assert.rejects(() => makeIntegrations(async () => { throw new Error('offline'); }).anki('deckNames'), /Anki is not connected/);
+});
