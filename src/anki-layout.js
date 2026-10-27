@@ -52,8 +52,10 @@ export function formatVocabularyHtml(clean, parser) {
     const element = doc.createElement('div'); element.innerHTML = html;
     return { html, text: element.textContent.trim() };
   }).filter(line => line.text);
-  const layout = vocabularyLayout(lines.map(line => line.text));
-  if (!layout) return null;
+  const layout = vocabularyLayout(lines.map(line => line.text)) || {
+    word: lines[0]?.text || '', inline: false, detailsFrom: 1,
+  };
+  if (!lines.length) return null;
   const root = doc.createElement('div'); root.className = 'anki-vocabulary';
   function region(className, html, text) {
     const element = doc.createElement('div'); element.className = className;
@@ -62,7 +64,7 @@ export function formatVocabularyHtml(clean, parser) {
     root.append(element);
   }
   region('anki-word', layout.inline ? null : lines[0].html, layout.inline ? layout.word : undefined);
-  region('anki-type', null, layout.type);
+  if (layout.type) region('anki-type', null, layout.type);
   if (lines.length > layout.detailsFrom) {
     const examples = doc.createElement('div'); examples.className = 'anki-examples';
     for (const line of lines.slice(layout.detailsFrom)) {

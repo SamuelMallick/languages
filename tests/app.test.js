@@ -35,6 +35,68 @@ async function fixture(t, integrations) {
   return { store, request, base };
 }
 
+test('listening generates the sentence and translation in one model call with student feedback', async t => {
+  const calls = [];
+  const pair = { sentence: 'Ik ga morgen naar de winkel.', translation: 'I am going to the shop tomorrow.' };
+  const { request } = await fixture(t, { tutor: async args => { calls.push(args); return JSON.stringify(pair); } });
+  const route = '/languages/dutch/listening';
+  const instructions = 'Use shorter sentences about shopping, with past tense.';
+  const generated = await request(route, { method: 'POST', body: { level: 'A2', previous: ['Hallo wereld.'], instructions } });
+  assert.equal(generated.status, 200);
+  assert.deepEqual(generated.data, { ...pair, level: 'A2' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].language.name, 'Dutch');
+  assert.equal(calls[0].tutorLevel, 'A2');
+  assert.ok(calls[0].messages[0].content.includes('Hallo wereld.'));
+  assert.ok(calls[0].messages[0].content.includes(instructions));
+  assert.ok(calls[0].tutorInstructions.includes('English translation'));
+  assert.ok(calls[0].tutorInstructions.includes('untrusted study data'));
+  assert.equal((await request('/languages/dutch/chats')).data.length, 0);
+  // History applies across levels, even when the client sends no history.
+  assert.equal((await request(route, { method: 'POST', body: { level: 'B1' } })).status, 502);
+  assert.equal(calls.length, 4);
+  for (const body of [{ level: '' }, { level: 'B3' }, { level: 'A1', instructions: 'x'.repeat(2001) }, { level: 'A1', instructions: 42 }]) {
+    assert.equal((await request(route, { method: 'POST', body })).status, 400);
+  }
+  assert.equal((await request('/languages/missing/listening', { method: 'POST', body: { level: 'A1' } })).status, 404);
+  assert.equal((await request(route, { method: 'POST', body: { level: 'A1', previous: [pair.sentence] } })).status, 502);
+});
+
+test('listening rejects malformed or incomplete generated sentence/translation pairs', async t => {
+  let result;
+  const { request } = await fixture(t, { tutor: async () => result });
+  const pair = { sentence: 'Hallo.', translation: 'Hello.' };
+  const invalid = ['', 'Not JSON', 'null', '[]', '{}',
+    JSON.stringify({ sentence: pair.sentence }),
+    JSON.stringify({ ...pair, sentence: '' }),
+    JSON.stringify({ ...pair, sentence: 'x'.repeat(601) }),
+    JSON.stringify({ ...pair, sentence: 'Hallo.\nDag.' }),
+    JSON.stringify({ ...pair, translation: '   ' }),
+    JSON.stringify({ ...pair, translation: 42 }),
+    JSON.stringify({ ...pair, translation: 'x'.repeat(1201) }),
+    JSON.stringify({ ...pair, translation: 'Hello.\nGoodbye.' })];
+  for (result of invalid) {
+    assert.equal((await request('/languages/dutch/listening', { method: 'POST', body: { level: 'A1' } })).status, 502);
+  }
+  result = '```json\n' + JSON.stringify(pair) + '\n```';
+  const generated = await request('/languages/dutch/listening', { method: 'POST', body: { level: 'A1' } });
+  assert.equal(generated.status, 200);
+  assert.deepEqual(generated.data, { ...pair, level: 'A1' });
+});
+
+test('listening generation provider failures can be retried', async t => {
+  let fail = true;
+  const { request } = await fixture(t, { tutor: async () => {
+    if (fail) throw new AppError(503, 'Tutor is unavailable.');
+    return JSON.stringify({ sentence: 'Hallo.', translation: 'Hello.' });
+  } });
+  const route = '/languages/dutch/listening';
+  const body = { level: 'A1' };
+  assert.equal((await request(route, { method: 'POST', body })).status, 503);
+  fail = false;
+  assert.equal((await request(route, { method: 'POST', body })).data.translation, 'Hello.');
+});
+
 test('per-conversation tutor settings persist, validate, and reach both providers', async t => {
   let received;
   const { request } = await fixture(t, { tutor: async value => { received = value; return 'Hallo'; } });
@@ -151,6 +213,55 @@ test('upload, selected section context, saved discussions, range edits, and casc
   assert.equal((await request(`/chats/${anotherChat.data.id}`)).status, 404);
 });
 
+test('practice and grammar questions accept per-question answers, persist them, and retain transcripts on failure', async t => {
+  const questions = '<practice-question>Fill the gap: Ik ___ een boek. (lezen)</practice-question>\n<practice-question>Translate: I have a cat.</practice-question>';
+  let received;
+  let fail = false;
+  const { request } = await fixture(t, { tutor: async args => {
+    received = args;
+    if (fail) throw new AppError(503, 'Tutor unavailable.');
+    return args.messages.at(-1).content.includes('My answer:') ? 'Both answers are correct.' : questions;
+  } });
+  const file = new FormData(); file.append('file', new Blob([await samplePdf()], { type: 'application/pdf' }), 'grammar.pdf');
+  const { data: doc } = await request('/languages/dutch/documents', { method: 'POST', body: file });
+  for (const grammar of [false, true]) {
+    const { data: chat } = await request('/chats', { method: 'POST', body: { languageId: 'dutch', ...(grammar ? { documentId: doc.id, sectionId: doc.sections[0].id } : {}) } });
+    const route = `/chats/${chat.id}/messages`;
+    for (const body of [{ action: 'unknown' }, { action: 'generate-practice', content: 'Override prompt' }]) {
+      assert.equal((await request(route, { method: 'POST', body })).status, 400);
+    }
+    fail = true;
+    assert.equal((await request(route, { method: 'POST', body: { action: 'generate-practice' } })).status, 503);
+    assert.equal((await request(`/chats/${chat.id}`)).data.messages.length, 0);
+    fail = false;
+    const generated = await request(route, { method: 'POST', body: { action: 'generate-practice' } });
+    assert.equal(generated.status, 200);
+    assert.equal(generated.data.messages[0].action, 'generate-practice');
+    assert.ok(received.messages.at(-1).content.includes(grammar ? 'exercises for this section' : 'practice questions in Dutch'));
+    if (!grammar) assert.equal(generated.data.title, 'Practice questions');
+    assert.equal(received.interactiveExercises, true);
+    assert.equal(Boolean(received.context), grammar);
+    const messageId = generated.data.messages[1].id;
+    const exercise = { messageId, answers: ['lees', 'Ik heb een kat.'] };
+    for (const invalid of [{ messageId: 'other-chat', answers: exercise.answers }, { messageId: generated.data.messages[0].id, answers: exercise.answers }, { messageId, answers: ['lees'] }, { messageId, answers: ['', 'Ik heb een kat.'] }, { messageId, answers: ['x'.repeat(1001), 'ok'] }]) {
+      assert.equal((await request(route, { method: 'POST', body: { exercise: invalid } })).status, 400);
+    }
+    fail = true;
+    assert.equal((await request(route, { method: 'POST', body: { exercise } })).status, 503);
+    assert.equal((await request(`/chats/${chat.id}`)).data.messages.length, 2);
+    fail = false;
+    const submitted = await request(route, { method: 'POST', body: { exercise } });
+    assert.equal(submitted.status, 200);
+    assert.ok(received.messages.at(-1).content.includes('Fill the gap: Ik ___ een boek. (lezen)\nMy answer: lees'));
+    assert.ok(received.messages.at(-1).content.includes('Translate: I have a cat.\nMy answer: Ik heb een kat.'));
+    const saved = (await request(`/chats/${chat.id}`)).data;
+    assert.equal(saved.messages[0].action, 'generate-practice');
+    assert.deepEqual(saved.messages[2].exercise, exercise);
+    assert.equal(saved.messages[3].content, 'Both answers are correct.');
+    assert.equal(saved.messages.length, 4);
+  }
+});
+
 test('chat failures preserve the prior transcript and concurrent messages are rejected', async t => {
   let reject; let mode = 'success';
   const { request } = await fixture(t, { tutor: async () => {
@@ -170,7 +281,7 @@ test('chat failures preserve the prior transcript and concurrent messages are re
   assert.equal((await request('/languages/turkish/chats')).data.length, 0);
 });
 
-test('Anki reviews respect scheduler order, require reveal, and reject stale or repeated ratings', async t => {
+test('Anki reviews require a space-triggered reveal, respect scheduler order, and reject stale or repeated ratings', async t => {
   const actions = []; let current = { cardId: 10, question: 'hallo', answer: 'hello [anki:play:a:0]', template: 'Basic', modelName: 'Vocabulary', fields: { Audio: { value: '[sound:hello.mp3]', order: 0 } }, buttons: [1, 2, 3, 4] };
   const { request } = await fixture(t, { anki: async (action, params) => {
     actions.push({ action, params });
@@ -190,12 +301,12 @@ test('Anki reviews respect scheduler order, require reveal, and reject stale or 
   const { data: start } = await request('/anki/review/start', { method: 'POST', body: { languageId: 'dutch', name: 'Dutch basics' } });
   assert.deepEqual(start.counts, { new: 1, learning: 0, review: 1 });
   assert.equal(start.card.category, 'new');
+  assert.deepEqual(start.card.audioFiles, { q: [], a: ['hello.mp3'] });
   const body = { token: start.token, cardId: 10, ease: 3 };
   assert.equal((await request('/anki/review/rate', { method: 'POST', body })).status, 400);
   const revealed = await request('/anki/review/reveal', { method: 'POST', body });
   assert.equal(revealed.status, 200);
   assert.equal(revealed.data.card.category, 'new');
-  assert.deepEqual(revealed.data.card.audioFiles, { q: [], a: ['hello.mp3'] });
   assert.deepEqual(revealed.data.counts, start.counts);
   const rated = await request('/anki/review/rate', { method: 'POST', body });
   assert.equal(rated.data.card.cardId, 11);

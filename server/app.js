@@ -1,5 +1,7 @@
 import express from 'express';
+import { generateListening } from './listening.js';
 import { TUTOR_LEVELS } from '../shared/tutor.js';
+import { parseExerciseContent, formatExerciseAnswers, practiceQuestionsPrompt } from '../shared/exercises.js';
 import { cardAudioFiles } from './anki-audio.js';
 import multer from 'multer';
 import { z, ZodError } from 'zod';
@@ -254,7 +256,7 @@ export function createApp(store, integrations, chatgpt = null) {
     if (!await anki('guiDeckReview', { name })) throw new AppError(502, 'Anki could not start this deck. Close any open Anki dialogs and try again.');
     const card = await reviewCard();
     review = { token: id(), languageId, name, cardId: card?.cardId, revealed: false };
-    return { token: review.token, card, counts: await reviewCounts(name) };
+    return { token: review.token, card, counts: await reviewCounts(name), reviewedToday: store.countReviewsToday(languageId) };
   })));
   app.post('/api/anki/review/reveal', async (req, res) => res.json(await withAnkiLock(async () => {
     const { token, cardId } = z.object({ token: short, cardId: z.number().int() }).parse(req.body);
@@ -273,7 +275,7 @@ export function createApp(store, integrations, chatgpt = null) {
     review.revealed = false;
     const card = await reviewCard();
     review.cardId = card?.cardId;
-    return { card, counts: await reviewCounts(review.name) };
+    return { card, counts: await reviewCounts(review.name), reviewedToday: store.countReviewsToday(review.languageId) };
   })));
   app.get('/api/anki/media', async (req, res) => {
     const filename = short.parse(req.query.filename);
@@ -306,6 +308,15 @@ export function createApp(store, integrations, chatgpt = null) {
     store.run('INSERT INTO chats (id, languageId, documentId, sectionId, title, messages, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)', chatId, data.languageId, data.documentId || null, data.sectionId || null, title, '[]', new Date().toISOString());
     res.status(201).json(chatView(store.get('SELECT * FROM chats WHERE id=?', chatId)));
   });
+  app.post('/api/languages/:id/listening', async (req, res) => {
+    const language = requireLanguage(req.params.id);
+    const { level, previous, instructions } = z.object({
+      level: z.enum(TUTOR_LEVELS.filter(Boolean)),
+      previous: z.array(z.string().max(600)).max(10).default([]),
+      instructions: z.string().trim().max(2000).default(''),
+    }).strict().parse(req.body);
+    res.json(await generateListening({ store, integrations, language, level, previous, instructions }));
+  });
   app.get('/api/chats/:id', (req, res) => {
     const chat = store.get('SELECT * FROM chats WHERE id=?', req.params.id);
     if (!chat) throw new AppError(404, 'Conversation not found.');
@@ -326,7 +337,11 @@ export function createApp(store, integrations, chatgpt = null) {
     res.json({ ok: true });
   });
   app.post('/api/chats/:id/messages', async (req, res) => {
-    const { content } = z.object({ content: z.string().trim().min(1).max(8000) }).parse(req.body);
+    const data = z.object({
+      content: z.string().trim().min(1).max(8000).optional(),
+      exercise: z.object({ messageId: short, answers: z.array(z.string().trim().min(1).max(1000)).min(1).max(12) }).strict().optional(),
+      action: z.enum(['generate-practice']).optional(),
+    }).refine(value => [value.content, value.exercise, value.action].filter(Boolean).length === 1, { message: 'Provide a message, exercise answers, or a practice action.' }).parse(req.body);
     const chat = store.get('SELECT * FROM chats WHERE id=?', req.params.id);
     if (!chat) throw new AppError(404, 'Conversation not found.');
     if (activeChats.has(chat.id)) throw new AppError(409, 'Your tutor is still responding to the previous message.');
@@ -343,7 +358,16 @@ export function createApp(store, integrations, chatgpt = null) {
         catch (error) { throw new AppError(422, error.message); }
       }
       const previous = JSON.parse(chat.messages);
-      const user = { id: id(), role: 'user', content, createdAt: new Date().toISOString() };
+      let content = data.action === 'generate-practice' ? practiceQuestionsPrompt(language, Boolean(chat.documentId)) : data.content;
+      if (data.exercise) {
+        const source = previous.find(message => message.id === data.exercise.messageId && message.role === 'assistant');
+        if (!source) throw new AppError(400, 'These practice questions are not in this conversation.');
+        const { questions } = parseExerciseContent(source.content);
+        if (!questions.length || questions.length !== data.exercise.answers.length) throw new AppError(400, 'Provide an answer for each practice question.');
+        content = formatExerciseAnswers(questions, data.exercise.answers);
+        if (content.length > 24000) throw new AppError(400, 'These answers are too long. Shorten them and try again.');
+      }
+      const user = { id: id(), role: 'user', content, createdAt: new Date().toISOString(), ...(data.exercise ? { exercise: data.exercise } : {}), ...(data.action ? { action: data.action } : {}) };
       // Bound the context window while keeping the complete local transcript.
       let budget = 24000;
       const recent = [];
@@ -352,9 +376,9 @@ export function createApp(store, integrations, chatgpt = null) {
         recent.unshift({ role: message.role, content: message.content });
         budget -= message.content.length;
       }
-      const answer = await integrations.tutor({ settings: store.settings(), language, messages: recent, context, sectionTitle, tutorInstructions: chat.documentId ? undefined : chat.tutorInstructions, tutorLevel: chat.documentId ? undefined : chat.tutorLevel });
+      const answer = await integrations.tutor({ settings: store.settings(), language, messages: recent, context, sectionTitle, tutorInstructions: chat.documentId ? undefined : chat.tutorInstructions, tutorLevel: chat.documentId ? undefined : chat.tutorLevel, interactiveExercises: true });
       const messages = [...previous, user, { id: id(), role: 'assistant', content: answer, createdAt: new Date().toISOString() }];
-      const title = !chat.documentId && previous.length === 0 ? content.slice(0, 65) : chat.title;
+      const title = !chat.documentId && previous.length === 0 ? data.action === 'generate-practice' ? 'Practice questions' : content.slice(0, 65) : chat.title;
       store.run('UPDATE chats SET messages=?, title=?, updatedAt=? WHERE id=?', JSON.stringify(messages), title, new Date().toISOString(), chat.id);
       store.record(language.id, chat.documentId ? 'grammar' : 'practice');
       res.json({ ...chatView(store.get('SELECT * FROM chats WHERE id=?', chat.id)), contextTruncated: Boolean(context?.truncated), historyTruncated: recent.length < previous.length + 1 });

@@ -68,5 +68,10 @@ The existing UI is not a style reference to preserve. Its promotional copy, deco
   2. Can any copy, decoration, container, or duplicate control be removed without losing clarity?
   3. Is there generous spacing and a clear visual hierarchy?
   4. Are errors, empty/loading states, keyboard navigation, and small-screen layouts still usable?
+- rebuild the app after every completed task.
+- only build once you are told to explicitely.
 
 When in doubt, choose the simpler, quieter version. Do not replace removed marketing copy with different marketing copy.
+
+## Commands
+- You do not have access to rg. Do not try and use it.

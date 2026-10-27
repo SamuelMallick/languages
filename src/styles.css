@@ -127,13 +127,25 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 .deck-grid, .reference-grid { display: grid; gap: 0; }
 .deck-card, .reference-card { padding: 28px 0; border-bottom: 1px solid var(--line); }
 .card-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.deck-card .card-top { float: right; }
+.deck-card { position: relative; padding-inline: 20px; transition: background-color .15s; }
+.deck-card:has(.deck-open:enabled):hover, .deck-card:has(.deck-open:focus-visible) { background: #f5f6f5; color: #202823; --ink: #202823; --muted: #59635d; }
+.deck-open { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; border-radius: 0; }
+.deck-open:disabled { opacity: 1; }
+.deck-card .card-top { float: right; position: relative; z-index: 1; }
 .deck-card h3 { font-size: 18px; overflow-wrap: anywhere; }
 .deck-card p, .reference-card-content > p { font-size: 13px; color: var(--muted); margin-top: 8px; }
 .deck-counts { display: flex; gap: 36px; margin: 24px 0; }
 .deck-counts span { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
-.deck-counts strong { font-size: 20px; font-weight: 500; color: var(--ink); }
-.deck-card > .button { width: auto; margin-top: 0; }
+.deck-counts strong { font-size: 20px; font-weight: 500; color: inherit; }
+.deck-counts .deck-new { color: #91bfff; }
+.deck-counts .deck-learning { color: #ff9b9b; }
+.deck-counts .deck-review { color: #9ac9ae; }
+.deck-card:has(.deck-open:enabled):hover .deck-new, .deck-card:has(.deck-open:focus-visible) .deck-new { color: #245ca8; }
+.deck-card:has(.deck-open:enabled):hover .deck-learning, .deck-card:has(.deck-open:focus-visible) .deck-learning { color: #b83232; }
+.deck-card:has(.deck-open:enabled):hover .deck-review, .deck-card:has(.deck-open:focus-visible) .deck-review { color: #286b45; }
+@media (prefers-reduced-motion: reduce) {
+  .deck-card { transition: none; }
+}
 .deck-picker { display: grid; gap: 8px; max-height: 360px; overflow: auto; margin: 24px 0; }
 .deck-picker > button { display: flex; align-items: center; gap: 16px; padding: 16px; background: white; border: 1px solid var(--line); border-radius: 4px; text-align: left; }
 .deck-picker > button > span { flex: 1; overflow-wrap: anywhere; }
@@ -143,11 +155,11 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 .mini-label { font-size: 13px; color: var(--muted); }
 .anki-content { width: 100%; max-width: 100%; font-size: 22px; line-height: 1.7; overflow-wrap: anywhere; }
 .anki-vocabulary { width: 100%; max-width: 560px; margin-inline: auto; }
-.anki-word { font-size: clamp(30px, 5vw, 42px); line-height: 1.3; font-weight: 550; letter-spacing: -.025em; }
-.anki-type { margin-top: 12px; font-size: 14px; line-height: 1.5; font-weight: 400; color: var(--muted); }
-.anki-examples { margin-top: 32px; padding-top: 28px; border-top: 1px solid var(--line); text-align: left; }
-.anki-examples p { font-size: 18px; line-height: 1.85; font-weight: 400; }
-.anki-examples p + p { margin-top: 16px; }
+.anki-word { font-size: clamp(30px, 5vw, 42px); line-height: 1.3; font-weight: 700; letter-spacing: -.025em; }
+.anki-type { display: inline-block; margin-top: 12px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 3px; font-size: 13px; line-height: 1.5; font-weight: 400; color: var(--muted); }
+.anki-examples { display: grid; gap: 12px; margin: 30px auto 0; padding: 0; text-align: left; }
+.anki-examples p { padding: 10px 14px; border-left: 2px solid var(--line); font-size: 15px; line-height: 1.65; font-weight: 400; color: var(--muted); }
+.anki-examples p + p { margin-top: 0; }
 .anki-content img { max-width: 100%; max-height: 250px; }
 .anki-audio { display: inline-flex; align-items: center; vertical-align: middle; margin: 12px 8px; }
 .anki-audio audio { display: none; }
@@ -159,6 +171,8 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 .rating-grid { display: flex; gap: 12px; }
 .rating { display: flex; flex: 1; flex-direction: column; gap: 8px; padding: 14px 8px; background: white; border: 1px solid #cbd2cd; border-radius: 4px; }
 .rating:hover { background: var(--surface); }
+.rating.key-selected { background: var(--green); color: var(--on-accent); border-color: var(--green); outline: 2px solid var(--green); outline-offset: 2px; }
+.rating.key-selected small { color: inherit; }
 .rating small { font-size: 12px; color: var(--muted); }
 .key-hint { font-size: 12px; margin-left: 8px; }
 .review-top ~ .small { margin-top: 24px; }
@@ -177,9 +191,8 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 .review-modal .anki-content { font-size: 19px; line-height: 1.5; }
 .review-modal .anki-word { font-size: clamp(26px, 4vw, 34px); }
 .review-modal .anki-type { margin-top: 8px; }
-.review-modal .anki-examples { margin-top: 18px; padding-top: 16px; }
-.review-modal .anki-examples p { font-size: 17px; line-height: 1.5; }
-.review-modal .anki-examples p + p { margin-top: 12px; }
+.review-modal .anki-examples { margin-top: 18px; gap: 8px; }
+.review-modal .anki-examples p { padding: 8px 12px; font-size: 15px; line-height: 1.5; }
 .review-modal .anki-content hr { margin: 16px 0; }
 .review-modal .anki-content img { max-height: min(180px, 25dvh); object-fit: contain; }
 .review-modal .rating-grid, .review-modal .button, .review-modal .notice { flex-shrink: 0; }
@@ -243,6 +256,26 @@ summary { cursor: pointer; min-height: 44px; padding: 12px 0; }
 .outline-editor-labels, .outline-editor-row { display: grid; grid-template-columns: minmax(120px,1fr) 68px 68px 68px 40px; gap: 8px; align-items: center; margin-bottom: 10px; }
 .outline-editor-labels { font-size: 12px; color: var(--muted); }
 .outline-editor-row input { padding: 10px 8px; font-size: 13px; }
+.practice-modes { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+.practice-modes button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 12px 0; min-height: 44px; color: var(--muted); }
+.practice-modes button[aria-pressed="true"] { border-bottom-color: var(--green); color: var(--ink); }
+.listening-practice { max-width: 680px; }
+.listening-controls { display: flex; flex-wrap: wrap; gap: 24px; margin-bottom: 20px; }
+.listening-controls label { flex: 1 1 180px; min-width: 0; }
+.listening-practice label { display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+.listening-controls select { width: 100%; min-width: 0; }
+.listening-practice > .small { margin-bottom: 24px; }
+.listening-exercise { margin-top: 36px; }
+.listening-exercise form { margin-top: 24px; }
+.listening-instructions { margin-bottom: 24px; }
+.listening-instructions p { margin-top: 10px; }
+.listening-instructions textarea, .listening-exercise textarea { width: 100%; padding: 14px; border: 1px solid var(--line); border-radius: 4px; background: var(--control); line-height: 1.6; resize: vertical; }
+.listening-exercise form > p { margin-top: 12px; }
+.listening-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; margin: 24px 0; }
+.listening-answer { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--line); }
+.listening-answer p { margin-top: 12px; font-size: 18px; overflow-wrap: anywhere; }
+.listening-answer-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
+.listening-translation { margin-top: 24px; }
 .practice-layout { display: grid; grid-template-columns: 220px minmax(0,1fr); gap: 32px; }
 .conversation-list { align-self: start; max-height: 650px; overflow: auto; }
 .conversation-list-title { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 13px; margin-bottom: 24px; }
@@ -297,6 +330,10 @@ summary { cursor: pointer; min-height: 44px; padding: 12px 0; }
 .message-body code { font-size: 13px; background: var(--surface); padding: 2px 4px; }
 .message-body blockquote { border-left: 2px solid var(--line); margin: 20px 0; padding-left: 20px; }
 .message-body img { max-width: 100%; }
+.exercise-question { margin: 24px 0; }
+.exercise-question label { display: block; font-size: 14px; margin: 12px 0 8px; }
+.exercise-question textarea { display: block; width: 100%; min-height: 88px; padding: 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--control); line-height: 1.6; resize: vertical; }
+.exercise-submit { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; margin-top: 20px; }
 .message.user { padding: 16px 20px; background: var(--surface); border-radius: 4px; }
 .message.user p { margin-bottom: 0; }
 .thinking { color: var(--muted); font-size: 13px; }

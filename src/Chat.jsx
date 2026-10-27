@@ -3,6 +3,8 @@ import ReactMarkdown from 'react-markdown';
 import { ArrowUp, LoaderCircle } from 'lucide-react';
 import { api, ErrorNotice, ExternalLink } from './ui.jsx';
 import { TutorContext } from './tutor-context.js';
+import ExerciseMessage from './ExerciseMessage.jsx';
+import { isInternalExerciseMessage } from '../shared/exercises.js';
 import { DEFAULT_TUTOR_INSTRUCTIONS, TUTOR_LEVELS } from '../shared/tutor.js';
 
 export default function Chat({ initial, language, grammar = false, tutorReady, onSettings, onUpdate }) {
@@ -25,19 +27,21 @@ export default function Chat({ initial, language, grammar = false, tutorReady, o
   }
   const interacted = useRef(false);
   useEffect(() => { if (grammar && !interacted.current) return; end.current?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'nearest' }); }, [chat.messages.length, busy, grammar]);
-  async function send(value = text) {
-    if (busy || saving || !value.trim()) return;
+  async function send(value = text, exercise, action) {
+    if (busy || saving || (!exercise && !action && !value.trim())) return;
     if (!grammar && dirty) { setTutorError('Save or reset your tutor settings before sending a message.'); return; }
     if (!tutorReady) { onSettings(); return; }
     interacted.current = true;
-    setBusy(true); setError(''); setPending(value); setText('');
-    try { const next = await api(`/chats/${chat.id}/messages`, { method: 'POST', body: { content: value } }); setChat(next); onUpdate?.(next); }
-    catch (e) { setError(e.message); setText(value); await refresh().catch(() => {}); }
-    finally { setBusy(false); setPending(''); input.current?.focus(); }
+    const internal = Boolean(exercise || action);
+    setBusy(true); setError(''); setPending(internal ? '' : value); if (!internal) setText('');
+    try { const next = await api(`/chats/${chat.id}/messages`, { method: 'POST', body: action ? { action } : exercise ? { exercise } : { content: value } }); setChat(next); onUpdate?.(next); }
+    catch (e) { setError(e.message); if (!internal) setText(value); await refresh().catch(() => {}); }
+    finally { setBusy(false); setPending(''); if (!internal) input.current?.focus(); }
   }
+  function submitAnswers(exercise) { send('', exercise); }
   const starters = grammar ? [
     { label: 'Summarise', prompt: 'Summarize this section with the key rules, useful examples, and page references.' },
-    { label: 'Generate practice questions', prompt: 'Give me three representative exercises for this section. Do not show the answers yet. After I attempt them, explain any corrections.' },
+    { label: 'Generate practice questions', action: 'generate-practice' },
   ] : [
     { label: 'Introductions', prompt: `Let’s get to know each other in ${language.name}. Start a simple conversation and help me with any mistakes.` },
     { label: 'Ordering at a café', prompt: `Let’s role-play ordering at a café in ${language.name}. You are the barista. Help when I get stuck.` },
@@ -52,8 +56,8 @@ export default function Chat({ initial, language, grammar = false, tutorReady, o
     <div className="tutor-settings-actions"><button className="button primary" disabled={busy || saving || !dirty}>{saving ? 'Saving…' : 'Save'}</button><button type="button" className="text-button" disabled={busy || saving} onClick={() => { setInstructions(DEFAULT_TUTOR_INSTRUCTIONS); setLevel(''); setTutorError(''); }}>Reset to defaults</button></div>
     {dirty && <p className="small muted" role="status">Unsaved changes</p>}
   </form></aside>}<div className={`chat-panel ${grammar ? `grammar-chat ${!chat.messages.length && !busy ? 'empty-discussion' : ''}` : ''}`}><header className="chat-header"><div><strong>{grammar ? 'Section discussion' : 'Conversation'}</strong><small>{language.name}</small></div></header>
-    {grammar && <div className="grammar-actions">{starters.map(({ label, prompt }) => <button className="button secondary small-button" key={label} disabled={busy} onClick={() => send(prompt)}>{label}</button>)}</div>}
-    <div className="chat-messages" aria-live="polite" aria-busy={busy}>{!grammar && !chat.messages.length && !busy ? <div className="chat-welcome"><div className="chat-starters">{starters.map(({ label, prompt }) => <button key={label} onClick={() => send(prompt)}>{label}</button>)}</div></div> : <>{chat.messages.map(message => <div key={message.id} className={`message ${message.role}`}><div className="message-body"><span className="message-author">{message.role === 'assistant' ? 'Mallick Diller tutor' : 'You'}</span><ReactMarkdown>{message.content}</ReactMarkdown></div></div>)}{busy && <><div className="message user"><div className="message-body"><span className="message-author">You</span><p>{pending}</p></div></div><div className="message assistant"><div className="thinking" role="status">Thinking…</div></div></>}</>}<div ref={end} /></div>
+    <div className="grammar-actions">{(grammar ? starters : [{ label: 'Generate practice questions', action: 'generate-practice' }]).map(({ label, prompt, action }) => <button className="button secondary small-button" key={label} disabled={busy || saving} onClick={() => send(prompt || '', undefined, action)}>{label}</button>)}</div>
+    <div className="chat-messages" aria-live="polite" aria-busy={busy}>{!grammar && !chat.messages.length && !busy ? <div className="chat-welcome"><div className="chat-starters">{starters.map(({ label, prompt }) => <button key={label} onClick={() => send(prompt)}>{label}</button>)}</div></div> : <>{chat.messages.filter(message => !isInternalExerciseMessage(message, language, grammar)).map(message => <div key={message.id} className={`message ${message.role}`}><div className="message-body"><span className="message-author">{message.role === 'assistant' ? 'Mallick Diller tutor' : 'You'}</span>{message.role === 'assistant' ? <ExerciseMessage message={message} submittedAnswers={chat.messages.filter(reply => reply.role === 'user' && reply.exercise?.messageId === message.id).at(-1)?.exercise.answers} disabled={busy || saving} onSubmit={submitAnswers} /> : <ReactMarkdown>{message.content}</ReactMarkdown>}</div></div>)}{busy && <>{pending && <div className="message user"><div className="message-body"><span className="message-author">You</span><p>{pending}</p></div></div>}<div className="message assistant"><div className="thinking" role="status">Thinking…</div></div></>}</>}<div ref={end} /></div>
     <div className="chat-bottom">{settings?.provider === 'chatgpt' && <div className={`chat-plan-status ${settings.chatgpt?.usageBlocked ? 'plan-paused' : ''}`}><span>{settings.chatgpt?.usageBlocked ? 'ChatGPT plan usage paused' : settings.chatgpt?.sharing ? 'Using ChatGPT plan' : 'Connect your ChatGPT plan'}</span><ExternalLink href="https://chatgpt.com/settings/usage">Manage usage</ExternalLink></div>}<ErrorNotice error={error} onClose={() => setError('')} />{(chat.contextTruncated || chat.historyTruncated) && <p className="small muted">{chat.contextTruncated ? 'This section is long; the tutor received its first 32,000 characters. Use smaller page ranges for full coverage. ' : ''}{chat.historyTruncated ? 'The tutor received recent messages; your full conversation is still saved.' : ''}</p>}{!tutorReady && <div className="tutor-connect"><span>Connect a tutor to send messages.</span><button onClick={onSettings}>Set up<ArrowUp size={13} className="diagonal" /></button></div>}<form className="composer" onSubmit={e => { e.preventDefault(); send(); }}><textarea ref={input} rows={2} maxLength={8000} disabled={busy} value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }} placeholder={grammar ? 'Ask about this chapter…' : `Message in ${language.name}…`} aria-label="Message your tutor" /><button className="send-button" disabled={busy || !text.trim()} aria-label="Send message">{busy ? <LoaderCircle size={19} className="spin" /> : <ArrowUp size={20} />}</button></form><p className="composer-hint">{grammar ? 'The selected section accompanies each message.' : ''} <span>AI can make mistakes.</span></p></div>
   </div></div>;
 }

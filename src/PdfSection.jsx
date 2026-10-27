@@ -6,9 +6,8 @@ import { Busy, ErrorNotice } from './ui.jsx';
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 
-export default function PdfSection({ documentId, section }) {
+export default function PdfSection({ documentId, section, page, onPageChange }) {
   const [pdf, setPdf] = useState(null);
-  const [page, setPage] = useState(section.startPage);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
   const [width, setWidth] = useState(0);
@@ -45,7 +44,7 @@ export default function PdfSection({ documentId, section }) {
     return () => { cancelled = true; render?.cancel(); };
   }, [pdf, page, width]);
   return <section className="pdf-section" aria-label={`${section.title} PDF pages`}>
-    <div className="pdf-toolbar"><span>Pages {section.startPage}–{section.endPage}</span><div><button className="icon-button" aria-label="Previous PDF page" disabled={page <= section.startPage} onClick={() => setPage(p => p - 1)}><ArrowLeft size={18} /></button><span aria-live="polite">Page {page}</span><button className="icon-button" aria-label="Next PDF page" disabled={page >= section.endPage} onClick={() => setPage(p => p + 1)}><ArrowRight size={18} /></button></div><a href={`${url}#page=${page}`} target="_blank" rel="noreferrer">Open PDF</a></div>
+    <div className="pdf-toolbar"><span>Pages {section.startPage}–{section.endPage}</span><div><button className="icon-button" aria-label="Previous PDF page" disabled={page <= section.startPage} onClick={() => onPageChange(page - 1)}><ArrowLeft size={18} /></button><span aria-live="polite">Page {page}</span><button className="icon-button" aria-label="Next PDF page" disabled={page >= section.endPage} onClick={() => onPageChange(page + 1)}><ArrowRight size={18} /></button></div><a href={`${url}#page=${page}`} target="_blank" rel="noreferrer">Open PDF</a></div>
     <ErrorNotice error={error} />
     <div className="pdf-page" ref={container}>{busy && <Busy>Loading page…</Busy>}<canvas ref={canvas} hidden={busy || Boolean(error)} role="img" aria-label={`PDF page ${page}. Extracted text is available below the reader.`} /></div>
   </section>;

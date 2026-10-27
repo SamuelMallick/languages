@@ -36,6 +36,12 @@ export function createStore(directory) {
       id TEXT PRIMARY KEY, languageId TEXT NOT NULL REFERENCES languages(id) ON DELETE CASCADE,
       kind TEXT NOT NULL, createdAt TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS listening_history (
+      id INTEGER PRIMARY KEY, languageId TEXT NOT NULL REFERENCES languages(id) ON DELETE CASCADE,
+      sentence TEXT NOT NULL, normalized TEXT NOT NULL, topic TEXT NOT NULL,
+      createdAt TEXT NOT NULL, UNIQUE(languageId, normalized)
+    );
+    CREATE INDEX IF NOT EXISTS listening_recent ON listening_history(languageId, id DESC);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
   const chatColumns = db.prepare('PRAGMA table_info(chats)').all();
@@ -57,6 +63,9 @@ export function createStore(directory) {
     get: (sql, ...args) => db.prepare(sql).get(...args),
     run: (sql, ...args) => db.prepare(sql).run(...args),
     record(languageId, kind) { db.prepare('INSERT INTO activity VALUES (?, ?, ?, ?)').run(id(), languageId, kind, new Date().toISOString()); },
+    countReviewsToday(languageId) {
+      return db.prepare("SELECT COUNT(*) AS count FROM activity WHERE languageId=? AND kind='review' AND substr(createdAt, 1, 10)=date('now')").get(languageId).count;
+    },
     settings() {
       const row = db.prepare("SELECT value FROM settings WHERE key='config'").get();
       const saved = row ? JSON.parse(row.value) : {};
