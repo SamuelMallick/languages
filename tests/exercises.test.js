@@ -29,6 +29,9 @@ test('both tutor providers request interactive question blocks only for chats', 
   const plan = makeIntegrations(undefined, { respond: async payload => { system = payload.instructions; return content; } });
   await plan.tutor({ ...args, interactiveExercises: true });
   assert.ok(system.includes('<practice-question>'));
+  assert.ok(system.includes("Only create interactive practice questions when the student's latest message explicitly asks"));
+  assert.ok(system.includes('role-play is not a request for interactive practice questions'));
+  assert.ok(system.includes('Do not continue generating interactive questions merely because earlier messages used them'));
   const local = makeIntegrations(async (url, options) => { system = JSON.parse(options.body).messages[0].content; return { ok: true, json: async () => ({ message: { content } }) }; });
   await local.tutor({ ...args, settings: { provider: 'ollama', ollamaUrl: 'http://localhost:11434', ollamaModel: 'test' }, interactiveExercises: true, context: { text: 'Page 1: articles.' }, sectionTitle: 'Articles' });
   assert.ok(system.includes('<practice-question>'));
@@ -57,8 +60,12 @@ test('each question renders an accessible answer box and saved answers remain vi
   assert.ok(saved.includes('Answers submitted'));
   const busy = renderToStaticMarkup(createElement(ExerciseMessage, { ...props, disabled: true }));
   assert.equal((busy.match(/disabled=""/g) || []).length, 3);
-  const plain = renderToStaticMarkup(createElement(ExerciseMessage, { ...props, message: { content: 'An ordinary explanation.' } }));
-  assert.ok(!plain.includes('<textarea'));
+  for (const content of ['An ordinary explanation.', 'Hoe gaat het met je?', 'Goed gedaan! Wat heb je vandaag gedaan?', 'Laten we een gesprek oefenen. Waar woon je?']) {
+    const plain = renderToStaticMarkup(createElement(ExerciseMessage, { ...props, message: { content } }));
+    assert.ok(plain.includes(content));
+    assert.ok(!plain.includes('<textarea'));
+    assert.ok(!plain.includes('Check answers'));
+  }
 });
 
 test('Practice and Grammar chats hide generation and checking prompts without hiding typed messages, answers, or feedback', async t => {
@@ -84,6 +91,11 @@ test('Practice and Grammar chats hide generation and checking prompts without hi
     assert.ok(!html.includes(practiceQuestionsPrompt(language, grammar)));
     assert.ok(!html.includes('Please check each of my answers'));
     assert.ok(!html.includes('My answer:'));
+    assert.equal(html.includes('>Set to default</button>'), !grammar);
+    if (!grammar) {
+      assert.match(html, /class="text-button"[^>]*>Set to default<\/button>/);
+      assert.match(html, /class="text-button"[^>]*>Reset to defaults<\/button>/);
+    }
     assert.ok(html.includes('Give me practice questions.'));
     assert.ok(html.includes('Both answers are correct.'));
     assert.ok(html.includes('>lees</textarea>'));
