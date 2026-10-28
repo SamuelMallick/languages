@@ -69,7 +69,7 @@ The existing UI is not a style reference to preserve. Its promotional copy, deco
   3. Is there generous spacing and a clear visual hierarchy?
   4. Are errors, empty/loading states, keyboard navigation, and small-screen layouts still usable?
 - rebuild the app after every completed task.
-- only build once you are told to explicitely.
+- Do not modify any files or implement any changes until told to explicitely. If the user expresses what they want, tell them how you would do it. Only make changes once you are told to explicitely.
 
 When in doubt, choose the simpler, quieter version. Do not replace removed marketing copy with different marketing copy.
 

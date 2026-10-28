@@ -285,6 +285,8 @@ test('Anki reviews require a space-triggered reveal, respect scheduler order, an
   const actions = []; let current = { cardId: 10, question: 'hallo', answer: 'hello [anki:play:a:0]', template: 'Basic', modelName: 'Vocabulary', fields: { Audio: { value: '[sound:hello.mp3]', order: 0 } }, buttons: [1, 2, 3, 4] };
   const { request } = await fixture(t, { anki: async (action, params) => {
     actions.push({ action, params });
+    if (action === 'getDeckConfig') return { id: 1, autoplay: true };
+    if (action === 'saveDeckConfig') return true;
     if (action === 'deckNames') return ['Dutch basics'];
     if (action === 'getDeckStats') return { 1: { name: 'Dutch basics', new_count: current.cardId === 10 ? 1 : 0, learn_count: 0, review_count: 1 } };
     if (action === 'guiDeckReview' || action === 'guiShowAnswer') return true;
@@ -294,7 +296,11 @@ test('Anki reviews require a space-triggered reveal, respect scheduler order, an
       return [{ type: current.cardId === 10 ? 0 : 3, queue: current.cardId === 10 ? 0 : 1 }];
     }
     if (action === 'modelTemplates') return { Basic: { Front: 'hallo', Back: 'hello {{Audio}}' } };
-    if (action === 'guiAnswerCard') { current = { ...current, cardId: 11 }; return true; }
+    if (action === 'guiAnswerCard') {
+      // Anki acknowledges the rating before its background scheduler advances.
+      setTimeout(() => { current = { ...current, cardId: 11 }; }, 20);
+      return true;
+    }
   } });
   assert.equal((await request('/languages/dutch/decks', { method: 'POST', body: { name: 'Dutch basics' } })).status, 201);
   assert.equal((await request('/languages/turkish/decks')).data.length, 0);
@@ -317,6 +323,87 @@ test('Anki reviews require a space-triggered reveal, respect scheduler order, an
   assert.equal((await request('/bootstrap')).data.languages[0].reviews, 1);
   current = { ...current, cardId: 99 };
   assert.equal((await request('/anki/review/reveal', { method: 'POST', body: { token: start.token, cardId: 11 } })).status, 409);
+});
+
+test('the last rating completes the deck when Anki leaves the reviewer, without recording it twice', async t => {
+  let finished = false;
+  let ratings = 0;
+  const { request } = await fixture(t, { anki: async action => {
+    if (action === 'getDeckConfig') return { id: 1, autoplay: true };
+    if (action === 'saveDeckConfig') return true;
+    if (action === 'deckNames') return ['Turkish'];
+    if (action === 'getDeckStats') return { 1: { name: 'Turkish', new_count: finished ? 0 : 1, learn_count: 0, review_count: 0 } };
+    if (action === 'guiDeckReview' || action === 'guiShowAnswer') return true;
+    if (action === 'guiCurrentCard') {
+      if (finished) throw new AppError(502, 'AnkiConnect: Gui review is not currently active.');
+      return { cardId: 42, question: 'ev', answer: 'house', buttons: [1, 2, 3, 4] };
+    }
+    if (action === 'cardsInfo') return [{ type: 0, queue: 0 }];
+    if (action === 'guiAnswerCard') { ratings++; finished = true; return true; }
+    throw new Error(`Unexpected Anki action: ${action}`);
+  } });
+  await request('/languages/turkish/decks', { method: 'POST', body: { name: 'Turkish' } });
+  const started = await request('/anki/review/start', { method: 'POST', body: { languageId: 'turkish', name: 'Turkish' } });
+  const body = { token: started.data.token, cardId: 42, ease: 3 };
+  assert.equal((await request('/anki/review/reveal', { method: 'POST', body })).status, 200);
+  const rated = await request('/anki/review/rate', { method: 'POST', body });
+  assert.equal(rated.status, 200);
+  assert.equal(rated.data.card, null);
+  assert.deepEqual(rated.data.counts, { new: 0, learning: 0, review: 0 });
+  assert.equal(rated.data.reviewedToday, 1);
+  assert.equal((await request('/anki/review/rate', { method: 'POST', body })).status, 409);
+  assert.equal(ratings, 1);
+  const reopened = await request('/anki/review/start', { method: 'POST', body: { languageId: 'turkish', name: 'Turkish' } });
+  assert.equal(reopened.status, 200);
+  assert.equal(reopened.data.card, null);
+  assert.equal(reopened.data.reviewedToday, 1);
+});
+
+test('unrelated Anki errors are not treated as a finished deck', async t => {
+  const { request } = await fixture(t, { anki: async action => {
+    if (action === 'getDeckConfig') return { id: 1, autoplay: true };
+    if (action === 'saveDeckConfig') return true;
+    if (action === 'deckNames') return ['Turkish'];
+    if (action === 'guiDeckReview') return true;
+    if (action === 'guiCurrentCard') throw new AppError(503, 'Anki is not connected.');
+    throw new Error(`Unexpected Anki action: ${action}`);
+  } });
+  await request('/languages/turkish/decks', { method: 'POST', body: { name: 'Turkish' } });
+  const result = await request('/anki/review/start', { method: 'POST', body: { languageId: 'turkish', name: 'Turkish' } });
+  assert.equal(result.status, 503);
+  assert.equal(result.data.error, 'Anki is not connected.');
+});
+
+test('nested Turkish decks use deck IDs for listing and review counts without confusing identical leaf names', async t => {
+  const names = ['Dutch::Vocabulary', 'Turkish::Vocabulary', 'Turkish::Empty'];
+  const stats = {
+    1: { deck_id: 1, name: 'Vocabulary', new_count: 2, learn_count: 1, review_count: 5, total_in_deck: 40 },
+    2: { deck_id: 2, name: 'Vocabulary', new_count: 20, learn_count: 3, review_count: 7, total_in_deck: 100 },
+    3: { deck_id: 3, name: 'Empty', new_count: 0, learn_count: 0, review_count: 0, total_in_deck: 0 },
+  };
+  const { request } = await fixture(t, { anki: async (action, params) => {
+    if (action === 'getDeckConfig') return { id: 1, autoplay: true };
+    if (action === 'saveDeckConfig') return true;
+    if (action === 'deckNames') return names;
+    if (action === 'deckNamesAndIds') return Object.fromEntries(names.map((name, index) => [name, index + 1]));
+    if (action === 'getDeckStats') return Object.fromEntries(Object.entries(stats).filter(([id]) => params.decks.includes(names[Number(id) - 1])));
+    if (action === 'guiDeckReview' || action === 'guiShowAnswer') return true;
+    if (action === 'guiCurrentCard') return { cardId: 20, question: 'ev', answer: 'house', buttons: [1, 2, 3, 4] };
+    if (action === 'cardsInfo') return [{ type: 0, queue: 0 }];
+    throw new Error(`Unexpected Anki action: ${action}`);
+  } });
+  const listed = await request('/anki/decks');
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.data.map(deck => [deck.name, deck.new_count, deck.learn_count, deck.review_count, deck.total_in_deck]), [
+    [names[0], 2, 1, 5, 40], [names[1], 20, 3, 7, 100], [names[2], 0, 0, 0, 0],
+  ]);
+  assert.equal((await request('/languages/turkish/decks', { method: 'POST', body: { name: names[1] } })).status, 201);
+  const started = await request('/anki/review/start', { method: 'POST', body: { languageId: 'turkish', name: names[1] } });
+  assert.equal(started.status, 200);
+  assert.deepEqual(started.data.counts, { new: 20, learning: 3, review: 7 });
+  const revealed = await request('/anki/review/reveal', { method: 'POST', body: { token: started.data.token, cardId: 20 } });
+  assert.equal(revealed.status, 200);
+  assert.deepEqual(revealed.data.counts, started.data.counts);
 });
 
 test('provider adapters use documented payloads and surface connection errors', async () => {

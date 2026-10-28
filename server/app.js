@@ -4,6 +4,7 @@ import { generateListening } from './listening.js';
 import { TUTOR_LEVELS } from '../shared/tutor.js';
 import { parseExerciseContent, formatExerciseAnswers, practiceQuestionsPrompt } from '../shared/exercises.js';
 import { cardAudioFiles } from './anki-audio.js';
+import { withoutDesktopAudio } from './anki-playback.js';
 import multer from 'multer';
 import { z, ZodError } from 'zod';
 import path from 'node:path';
@@ -39,7 +40,15 @@ export function createApp(store, integrations, chatgpt = null, access = {}) {
   };
   const anki = (action, params) => integrations.anki(action, params, store.settings());
   async function reviewCard() {
-    const card = await anki('guiCurrentCard');
+    let card;
+    try {
+      card = await anki('guiCurrentCard');
+    } catch (error) {
+      // After the final rating Anki leaves the reviewer for its finished screen.
+      // AnkiConnect throws here instead of returning null for the next card.
+      if (error.message === 'AnkiConnect: Gui review is not currently active.') return null;
+      throw error;
+    }
     if (card) {
       card.category = null;
       try {
@@ -62,11 +71,25 @@ export function createApp(store, integrations, chatgpt = null, access = {}) {
     }
     return card;
   }
+  async function deckStats(names) {
+    const stats = names.length ? await anki('getDeckStats', { decks: names }) : {};
+    // Anki's due tree can report only the final component of a subdeck name.
+    // Resolve those entries by ID, never by an ambiguous leaf name.
+    const values = Object.values(stats || {});
+    const ids = names.some(name => !values.some(deck => deck.name === name))
+      ? await anki('deckNamesAndIds') : {};
+    return names.map(name => {
+      const deckId = ids?.[name];
+      const deck = (deckId != null ? stats?.[deckId] || values.find(deck => String(deck.deck_id) === String(deckId)) : null)
+        || values.find(deck => deck.name === name);
+      return { ...deck, name };
+    });
+  }
   async function reviewCounts(name) {
     try {
-      const stats = await anki('getDeckStats', { decks: [name] });
-      const deck = Object.values(stats || {}).find(deck => deck.name === name);
-      return deck ? { new: deck.new_count, learning: deck.learn_count, review: deck.review_count } : null;
+      const [deck] = await deckStats([name]);
+      return [deck.new_count, deck.learn_count, deck.review_count].every(Number.isFinite)
+        ? { new: deck.new_count, learning: deck.learn_count, review: deck.review_count } : null;
     } catch {
       // A stats failure must not turn a successful rating into a failed request.
       return null;
@@ -231,8 +254,7 @@ export function createApp(store, integrations, chatgpt = null, access = {}) {
   });
   app.get('/api/anki/decks', async (req, res) => {
     const names = await anki('deckNames');
-    const stats = names.length ? await anki('getDeckStats', { decks: names }) : {};
-    res.json(names.map(name => ({ name, ...(Object.values(stats || {}).find(s => s.name === name) || {}) })));
+    res.json(await deckStats(names));
   });
   app.post('/api/languages/:id/decks', async (req, res) => {
     requireLanguage(req.params.id);
@@ -246,27 +268,41 @@ export function createApp(store, integrations, chatgpt = null, access = {}) {
   app.post('/api/anki/review/start', async (req, res) => res.json(await withAnkiLock(async () => {
     const { languageId, name } = z.object({ languageId: short, name: short }).parse(req.body);
     if (!store.get('SELECT id FROM decks WHERE languageId=? AND name=?', languageId, name)) throw new AppError(400, 'Link this deck to your language first.');
-    if (!await anki('guiDeckReview', { name })) throw new AppError(502, 'Anki could not start this deck. Close any open Anki dialogs and try again.');
-    const card = await reviewCard();
+    const card = await withoutDesktopAudio(anki, name, async () => {
+      if (!await anki('guiDeckReview', { name })) throw new AppError(502, 'Anki could not start this deck. Close any open Anki dialogs and try again.');
+      return await reviewCard();
+    });
     review = { token: id(), languageId, name, cardId: card?.cardId, revealed: false };
     return { token: review.token, card, counts: await reviewCounts(name), reviewedToday: store.countReviewsToday(languageId) };
   })));
   app.post('/api/anki/review/reveal', async (req, res) => res.json(await withAnkiLock(async () => {
     const { token, cardId } = z.object({ token: short, cardId: z.number().int() }).parse(req.body);
     await checkedCard(token, cardId);
-    if (!await anki('guiShowAnswer')) throw new AppError(409, 'Anki could not show this answer. Restart the review.');
+    const card = await withoutDesktopAudio(anki, review.name, async () => {
+      if (!await anki('guiShowAnswer')) throw new AppError(409, 'Anki could not show this answer. Restart the review.');
+      return await reviewCard();
+    });
     review.revealed = true;
-    return { card: await reviewCard(), counts: await reviewCounts(review.name) };
+    return { card, counts: await reviewCounts(review.name) };
   })));
   app.post('/api/anki/review/rate', async (req, res) => res.json(await withAnkiLock(async () => {
     const { token, cardId, ease } = z.object({ token: short, cardId: z.number().int(), ease: z.number().int().min(1).max(4) }).parse(req.body);
     const current = await checkedCard(token, cardId);
     if (!review.revealed || !current.buttons?.includes(ease)) throw new AppError(400, 'Reveal the answer and choose an available rating.');
-    if (!await anki('guiAnswerCard', { ease })) throw new AppError(409, 'Anki did not accept that rating. Restart the review.');
-    store.record(review.languageId, 'review');
-    review.cardId = null;
-    review.revealed = false;
-    const card = await reviewCard();
+    const card = await withoutDesktopAudio(anki, review.name, async () => {
+      if (!await anki('guiAnswerCard', { ease })) throw new AppError(409, 'Anki did not accept that rating. Restart the review.');
+      store.record(review.languageId, 'review');
+      review.cardId = null;
+      review.revealed = false;
+      // Modern Anki answers in the background. Keep desktop audio disabled until
+      // the next card has actually appeared, not just until the API acknowledges.
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const next = await reviewCard();
+        if (!next || next.cardId !== cardId) return next;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      throw new AppError(504, 'Anki is still changing cards. Restart the review.');
+    });
     review.cardId = card?.cardId;
     return { card, counts: await reviewCounts(review.name), reviewedToday: store.countReviewsToday(review.languageId) };
   })));

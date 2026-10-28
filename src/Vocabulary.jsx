@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { formatVocabularyHtml } from './anki-layout.js';
-import { addAudioControls, replayAudio } from './anki-media.js';
+import { addAudioControls } from './anki-media.js';
+import { VocabularyAudio } from './vocabulary-audio.js';
 import { Check, CheckCircle2, Layers3, Link2, Plus, RefreshCw, Unlink, Wifi, WifiOff } from 'lucide-react';
 import { api, Busy, EmptyState, ErrorNotice, Modal, ExternalLink } from './ui.jsx';
 
@@ -11,6 +12,9 @@ export default function Vocabulary({ language, onChange }) {
   const [connecting, setConnecting] = useState(false); const [linking, setLinking] = useState(false);
   const [busyDeck, setBusyDeck] = useState(''); const [review, setReview] = useState(null);
   const [checked, setChecked] = useState(false);
+  const audio = useRef(null);
+  audio.current ??= new VocabularyAudio();
+  useEffect(() => () => audio.current.close(), []);
   async function load() { setDecks(await api(`/languages/${language.id}/decks`)); }
   async function connect() {
     setConnecting(true); setConnectionError('');
@@ -20,7 +24,7 @@ export default function Vocabulary({ language, onChange }) {
   useEffect(() => { load().catch(e => setError(e.message)); connect(); }, []);
   async function link(name) { setBusyDeck(name); setError(''); try { await api(`/languages/${language.id}/decks`, { method: 'POST', body: { name } }); await load(); await onChange(); } catch (e) { setError(e.message); } finally { setBusyDeck(''); } }
   async function unlink(deck) { setBusyDeck(deck.name); setError(''); try { await api(`/decks/${deck.id}`, { method: 'DELETE' }); await load(); await onChange(); } catch (e) { setError(e.message); } finally { setBusyDeck(''); } }
-  async function start(deck) { setBusyDeck(deck.name); setError(''); try { const result = await api('/anki/review/start', { method: 'POST', body: { languageId: language.id, name: deck.name } }); setReview({ ...result, name: deck.name }); } catch (e) { setError(e.message); } finally { setBusyDeck(''); } }
+  async function start(deck) { audio.current.unlock().catch(() => {}); setBusyDeck(deck.name); setError(''); try { const result = await api('/anki/review/start', { method: 'POST', body: { languageId: language.id, name: deck.name } }); setReview({ ...result, name: deck.name }); } catch (e) { setError(e.message); } finally { setBusyDeck(''); } }
   const connected = checked && !connectionError;
   return <div className="page-content"><div className="page-heading compact"><div><h1>Vocabulary</h1></div><button className="button primary" onClick={() => setLinking(true)}><Plus size={17} />Link Anki deck</button></div>
     <ErrorNotice error={error} onClose={() => setError('')} /><div className="section-heading"><h2>Linked decks <span className="count-badge">{decks?.length || 0}</span></h2></div>
@@ -28,14 +32,14 @@ export default function Vocabulary({ language, onChange }) {
     <div className={`connection-strip ${connected ? 'connected' : ''}`}><span className="path-icon pale">{connected ? <Wifi size={20} /> : <WifiOff size={20} />}</span><div><strong>{connecting ? 'Looking for Anki…' : connected ? 'Anki is connected' : 'Anki not connected'}</strong><p>{connected ? 'Your reviews use Anki’s scheduler and sync back to your collection.' : 'Open Anki with the AnkiConnect add-on to review your cards here.'}</p></div><button className="button secondary" onClick={connect} disabled={connecting}><RefreshCw size={15} className={connecting ? 'spin' : ''} />{connected ? 'Refresh' : 'Connect'}</button></div>
     {connectionError && <div className="setup-help"><p>{connectionError}</p><span>In Anki: Tools → Add-ons → Get Add-ons → <code>2055492159</code>, then restart Anki. <ExternalLink href="https://ankiweb.net/shared/info/2055492159">AnkiConnect setup</ExternalLink></span></div>}
     {linking && <Modal title="Link an Anki deck" onClose={() => setLinking(false)}><p className="muted">Select a deck. Cards and scheduling remain in Anki.</p>{connecting ? <Busy>Finding your decks…</Busy> : connectionError ? <><ErrorNotice error={connectionError} /><button className="button secondary full" onClick={connect}><RefreshCw size={16} />Try connecting again</button></> : !available.length ? <p className="muted">No decks found. Create or import a deck in Anki, then refresh.</p> : <div className="deck-picker">{available.map(deck => { const linked = decks?.some(d => d.name === deck.name); return <button key={deck.name} onClick={() => link(deck.name)} disabled={linked || Boolean(busyDeck)}><Layers3 size={20} /><span>{deck.name}<small>{deck.total_in_deck ?? '—'} cards</small></span>{linked ? <Check size={18} /> : <Plus size={18} />}</button>; })}</div>}<ErrorNotice error={error} /><button className="button secondary full" onClick={() => setLinking(false)}>Done</button></Modal>}
-    {review && <Review initial={review} onChange={onChange} onClose={() => { setReview(null); connect(); onChange(); }} />}
+    {review && <Review initial={review} audio={audio.current} onChange={onChange} onClose={() => { setReview(null); connect(); onChange(); }} />}
   </div>;
 }
 
-function CardContent({ html, audioFiles }) {
+function CardContent({ html, audioFiles, player }) {
   const [audioError, setAudioError] = useState('');
-  const playing = useRef(null);
-  useEffect(() => () => { playing.current?.pause(); }, []);
+  const [blocked, setBlocked] = useState(false);
+  const container = useRef(null);
   const document = new DOMParser().parseFromString(html || '', 'text/html');
   document.querySelectorAll('a').forEach(link => {
     const reference = link.getAttribute('href')?.match(/^(?:playsound:|anki:play:|play:)([qa]):(\d+)$/)
@@ -55,6 +59,21 @@ function CardContent({ html, audioFiles }) {
   const clean = DOMPurify.sanitize(document.body.innerHTML, { FORBID_TAGS: ['style', 'iframe', 'form', 'input', 'button', 'svg', 'math'], FORBID_ATTR: ['style', 'srcset', 'autoplay'], ALLOW_DATA_ATTR: false });
   const formatted = formatVocabularyHtml(clean, new DOMParser());
   const content = addAudioControls(formatted || clean, audioFiles, new DOMParser());
+  function report(error) {
+    setBlocked(error.name === 'NotAllowedError');
+    setAudioError(error.name === 'NotAllowedError' ? '' : 'Could not play audio. Check that Anki is open and the audio format is supported by this device.');
+  }
+  function urls() { return [...container.current.querySelectorAll('audio[src]')].map(audio => audio.src); }
+  useEffect(() => {
+    let active = true;
+    const files = urls();
+    if (files.length) player.play(files).catch(error => { if (active) report(error); });
+    return () => { active = false; player.stop(); };
+  }, [content, player]);
+  async function enable() {
+    try { await player.unlock(); setBlocked(false); setAudioError(''); await player.play(urls()); }
+    catch (error) { report(error); }
+  }
   async function play(event) {
     const button = event.target.closest?.('.audio-play');
     if (!button) return;
@@ -62,15 +81,15 @@ function CardContent({ html, audioFiles }) {
     if (!audio) return;
     try {
       setAudioError('');
-      playing.current?.pause();
-      playing.current = audio;
-      await replayAudio(audio);
-    } catch { setAudioError('Could not play audio. Check that Anki is open and the media file is available.'); }
+      await player.unlock();
+      setBlocked(false);
+      await player.play([audio.src]);
+    } catch (error) { report(error); }
   }
-  return <><div className="anki-content" onClick={play} onErrorCapture={event => { if (event.target.tagName === 'AUDIO') setAudioError('Could not load this audio file from Anki.'); }} dangerouslySetInnerHTML={{ __html: content }} /><ErrorNotice error={audioError} onClose={() => setAudioError('')} /></>;
+  return <><div ref={container} className="anki-content" onClick={play} onErrorCapture={event => { if (event.target.tagName === 'AUDIO') setAudioError('Could not load this audio file from Anki.'); }} dangerouslySetInnerHTML={{ __html: content }} />{blocked && <button className="button secondary" onClick={enable}>Enable audio</button>}<ErrorNotice error={audioError} onClose={() => setAudioError('')} /></>;
 }
 
-function Review({ initial, onClose, onChange }) {
+function Review({ initial, audio, onClose, onChange }) {
   const [card, setCard] = useState(initial.card); const [revealed, setRevealed] = useState(false);
   const [counts, setCounts] = useState(initial.counts);
   const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [reviewedToday, setReviewedToday] = useState(initial.reviewedToday ?? 0); const [selectedEase, setSelectedEase] = useState(null);
@@ -81,5 +100,5 @@ function Review({ initial, onClose, onChange }) {
     window.addEventListener('keydown', key, true); return () => window.removeEventListener('keydown', key, true);
   });
   const labels = card?.buttons?.length === 2 ? ['Again', 'Good'] : card?.buttons?.length === 3 ? ['Again', 'Good', 'Easy'] : ['Again', 'Hard', 'Good', 'Easy'];
-  return <Modal title={initial.name} wide className="review-modal" onClose={onClose}><div className="review-top"><div className="review-counts" aria-label="Remaining cards" aria-live="polite">{[['new', 'New'], ['learning', 'Learning'], ['review', 'Review']].map(([category, label]) => <span key={category} className={`queue-${category}`} aria-current={card?.category === category ? 'true' : undefined}><strong>{counts?.[category] ?? '—'}</strong> <span className="queue-label">{label}</span></span>)}</div><span>{reviewedToday} reviewed today</span></div><ErrorNotice error={error} />{card ? <><div className="flashcard"><CardContent key={`${card.cardId}-${revealed}`} html={revealed ? card.answer : card.question} audioFiles={card.audioFiles} /></div>{revealed ? <div className="rating-grid">{card.buttons?.map((ease, i) => <button disabled={busy} className={`rating rating-${labels[i]?.toLowerCase()} ${selectedEase === ease ? 'key-selected' : ''}`} key={ease} onClick={() => rate(ease)}><span>{labels[i]}</span><small>{card.nextReviews?.[i] || `Key ${ease}`}</small></button>)}</div> : <button className="button primary full" disabled={busy} onClick={reveal}>{busy ? 'Loading…' : 'Reveal answer'}<span className="key-hint">space</span></button>}</> : <EmptyState icon={CheckCircle2} title="No cards due" action={<button className="button primary" onClick={onClose}>Back to vocabulary<Check size={17} /></button>}>Anki has no cards ready in this deck.</EmptyState>}</Modal>;
+  return <Modal title={initial.name} wide className="review-modal" onClose={onClose}><div className="review-top"><div className="review-counts" aria-label="Remaining cards" aria-live="polite">{[['new', 'New'], ['learning', 'Learning'], ['review', 'Review']].map(([category, label]) => <span key={category} className={`queue-${category}`} aria-current={card?.category === category ? 'true' : undefined}><strong>{counts?.[category] ?? '—'}</strong> <span className="queue-label">{label}</span></span>)}</div><span>{reviewedToday} reviewed today</span></div><ErrorNotice error={error} />{card ? <><div className="flashcard"><CardContent key={`${card.cardId}-${revealed}`} html={revealed ? card.answer : card.question} audioFiles={card.audioFiles} player={audio} /></div>{revealed ? <div className="rating-grid">{card.buttons?.map((ease, i) => <button disabled={busy} className={`rating rating-${labels[i]?.toLowerCase()} ${selectedEase === ease ? 'key-selected' : ''}`} key={ease} onClick={() => rate(ease)}><span>{labels[i]}</span><small>{card.nextReviews?.[i] || `Key ${ease}`}</small></button>)}</div> : <button className="button primary full" disabled={busy} onClick={reveal}>{busy ? 'Loading…' : 'Reveal answer'}<span className="key-hint">space</span></button>}</> : <EmptyState icon={CheckCircle2} title="No cards due" action={<button className="button primary" onClick={onClose}>Back to vocabulary<Check size={17} /></button>}>Anki has no cards ready in this deck.</EmptyState>}</Modal>;
 }

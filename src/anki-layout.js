@@ -23,8 +23,11 @@ export function vocabularyLayout(texts) {
 export function formatVocabularyHtml(clean, parser) {
   const doc = parser.parseFromString(clean, 'text/html');
   if (doc.body.querySelector('hr')) {
+    // Splitting inside a template container would break its nesting.
+    if ([...doc.body.querySelectorAll('hr')].some(hr => hr.parentElement !== doc.body)) return null;
     const sections = clean.split(/<hr\b[^>]*>/i);
-    return sections.map(section => formatVocabularyHtml(section, parser) || section).join('<hr>');
+    const formatted = sections.map(section => formatVocabularyHtml(section, parser));
+    return formatted.some(Boolean) ? formatted.map((section, index) => section || sections[index]).join('<hr>') : null;
   }
   if (doc.body.querySelector('table, ul, ol, pre, img, audio, video, ruby')) return null;
   function parts(node) {
@@ -52,10 +55,10 @@ export function formatVocabularyHtml(clean, parser) {
     const element = doc.createElement('div'); element.innerHTML = html;
     return { html, text: element.textContent.trim() };
   }).filter(line => line.text);
-  const layout = vocabularyLayout(lines.map(line => line.text)) || {
-    word: lines[0]?.text || '', inline: false, detailsFrom: 1,
-  };
-  if (!lines.length) return null;
+  const layout = vocabularyLayout(lines.map(line => line.text));
+  // Keep unfamiliar templates intact: a first line is not necessarily a word,
+  // and subsequent lines are not necessarily examples.
+  if (!layout) return null;
   const root = doc.createElement('div'); root.className = 'anki-vocabulary';
   function region(className, html, text) {
     const element = doc.createElement('div'); element.className = className;
