@@ -1,7 +1,24 @@
 node_modules/
 dist/
-data/
+# Personal app data (including uploads and connection credentials)
+/data/
 .env
+.env.*
+!.env.example
+
+# Personal documents, Anki exports, and database copies anywhere in the repo
+*.pdf
+*.apkg
+*.colpkg
+*.anki2
+*.anki21
+*.anki21b
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
 *.log
 .DS_Store
 test-results/

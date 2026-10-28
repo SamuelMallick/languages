@@ -152,6 +152,22 @@ Manual smoke test:
 
 Browser visual verification depends on your local browser. Live Anki and LLM verification requires your running Anki installation and configured provider.
 
+## Personal data and Git
+
+The repository contains the app, not your saved learning workspace. Personal app data is kept locally under `data/`, which Git ignores:
+
+- `data/lingua.sqlite`: linked Anki deck names, languages, settings, extracted PDF text/outlines, conversations, and learning history/progress.
+- `data/uploads/`: the original uploaded PDFs.
+- `data/chatgpt/`: local ChatGPT credentials and installation identity.
+
+Actual Anki cards, media, and scheduling remain in Anki's own profile, outside this app. The browser also keeps small navigation/session preferences locally. Optional `.env` settings are local and ignored; only the placeholder `.env.example` belongs in Git.
+
+A fresh clone does not include your linked decks, PDFs, conversations, or account connections. It starts with empty language workspaces. No data migration is needed to keep the existing `data/` directory local. To share the app, share the Git repository, **not a ZIP of your working folder**, which could include ignored personal files.
+
+Git also ignores PDF files, Anki deck exports, SQLite/database files, and private `.env.*` variants elsewhere in the repository as protection against accidental staging. Ignore rules are not encryption and do not stop `git add -f` or remove files already committed. Before committing, inspect `git status --short` and `git diff --cached --name-only`. If personal data was previously pushed, ignoring it now would not erase that history; remove it from history separately and revoke any exposed credentials.
+
+Local storage does not mean every integration stays offline: ChatGPT receives the messages and selected reference context needed for tutor requests, Anki may sync through its own configuration, and optional Tailscale access lets your authorized devices use the computer's saved workspace. Use a local Ollama provider if tutor requests must stay on your computer.
+
 ## Data and project structure
 
 ```text
