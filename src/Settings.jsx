@@ -14,6 +14,7 @@ export default function Settings({ initial, onClose, onSaved }) {
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const connection = form.chatgpt || { profiles: [] };
+  const signInAvailable = connection.signInAvailable !== false;
   const set = (key, value) => { setForm(previous => ({ ...previous, [key]: value })); setSaved(false); };
 
   async function loadModels(isCurrent = () => true) {
@@ -81,16 +82,17 @@ export default function Settings({ initial, onClose, onSaved }) {
               {connection.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.label}{profile.email ? ` · ${profile.email}` : ' · sign-in needed'}</option>)}
             </select>
           </label>}
+          {!signInAvailable && <p className="small muted provider-note">To connect or reconnect ChatGPT, open Settings on the computer running this app using its localhost address. Then reopen Settings here to use the saved connection.</p>}
           {connection.connected ? <>
             <p className="connection-identity">{connection.email || connection.name || connection.label}</p>
             <div className={`notice ${connection.sharing ? 'success' : ''}`}><Check size={17} /><span>{connection.sharing ? 'ChatGPT plan usage is enabled.' : 'Signed in. Permission to use your ChatGPT plan is not enabled yet.'}</span></div>
-            {!connection.sharing && <button className="button chatgpt-button full" type="button" disabled={busy} onClick={() => signIn({ profileId: connection.activeId, enablePlan: true })}>Enable ChatGPT plan usage</button>}
+            {!connection.sharing && <button className="button chatgpt-button full" type="button" disabled={busy || !signInAvailable} onClick={() => signIn({ profileId: connection.activeId, enablePlan: true })}>Enable ChatGPT plan usage</button>}
             <div className="connection-actions">
-              <button className="text-button" type="button" disabled={busy} onClick={() => signIn({ profileId: connection.activeId })}>Sign in again</button>
+              <button className="text-button" type="button" disabled={busy || !signInAvailable} onClick={() => signIn({ profileId: connection.activeId })}>Sign in again</button>
               <button className="text-button" type="button" disabled={busy} onClick={() => updateConnection('sign-out', { profileId: connection.activeId })}><LogOut size={14} />Sign out</button>
             </div>
-          </> : <button className="button chatgpt-button full" type="button" disabled={busy} onClick={() => signIn(connection.activeId ? { profileId: connection.activeId } : {})}>{busy ? 'Opening ChatGPT…' : 'Continue with ChatGPT'}</button>}
-          {connection.profiles.length > 0 && <button className="text-button add-account" type="button" disabled={busy} onClick={() => signIn({ newProfile: true })}>Use another ChatGPT account or workspace</button>}
+          </> : <button className="button chatgpt-button full" type="button" disabled={busy || !signInAvailable} onClick={() => signIn(connection.activeId ? { profileId: connection.activeId } : {})}>{busy ? 'Opening ChatGPT…' : 'Continue with ChatGPT'}</button>}
+          {connection.profiles.length > 0 && <button className="text-button add-account" type="button" disabled={busy || !signInAvailable} onClick={() => signIn({ newProfile: true })}>Use another ChatGPT account or workspace</button>}
         </div>
 
         {connection.needsWelcome && <div className="chatgpt-welcome" role="status">

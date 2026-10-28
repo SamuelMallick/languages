@@ -23,6 +23,66 @@ npm.cmd run dev
 
 After source changes, run `npm.cmd run build` before using `npm.cmd start` again. To change the port, copy `.env.example` to `.env` and set `PORT=3001` (or another free port).
 
+## Use an iPad from anywhere with Tailscale
+
+The Windows computer runs the app, keeps all saved data, and connects to Anki and the tutor. The iPad uses Safari over a private **Tailscale Serve HTTPS connection**. Both devices need internet access, and the computer must remain on, awake, and running the app. This is not an offline iPad app.
+
+### One-time setup
+
+1. Install [Tailscale on Windows](https://tailscale.com/download/windows) and the Tailscale app on your iPad. Sign in to both with the same personal account and connect both devices. An untagged, personally owned iPad is required so Serve can identify your account.
+2. On the computer, run the app with `npm.cmd start`. Keep using **http://127.0.0.1:3000** on that computer. If needed, connect ChatGPT there before moving to the iPad; its sign-in flow cannot complete from the iPad.
+3. In a **second PowerShell window**, run:
+
+   ```powershell
+   tailscale serve --bg http://127.0.0.1:3000
+   ```
+
+   Follow any Tailscale prompt to enable HTTPS certificates. The command prints a private address such as `https://your-computer.your-tailnet.ts.net`. Use **Serve**, not **Funnel**: Funnel is for public internet access. You do not need router port forwarding or an inbound firewall rule for the app's port.
+4. If you do not already have a `.env` file, copy the example:
+
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+   **Do not overwrite an existing `.env`.** Edit it and add both values, replacing these examples with the actual Serve address and your exact Tailscale login name (shown in the Tailscale admin console):
+
+   ```dotenv
+   TAILSCALE_ORIGIN=https://your-computer.your-tailnet.ts.net
+   TAILSCALE_LOGIN=your-tailscale-login@example.com
+   ```
+
+   The address must be HTTPS on your `.ts.net` hostname, with no path. Use the login name, not your display name or Windows username. Only that Tailscale account is permitted to access the app remotely.
+5. Stop the app with **Ctrl+C**, then restart it with `npm.cmd start` so it reads `.env`. On the iPad, leave Tailscale connected and open the exact HTTPS address in Safari. Optionally use Safari's **Add to Home Screen** action as a shortcut; this does not add offline support.
+
+If `PORT` is not `3000`, use your configured port in both the local browser address and the Serve command. The HTTPS address still normally uses port 443. Do not change the app's bind address to `0.0.0.0`; it intentionally stays on `127.0.0.1` and trusts Serve only over loopback.
+
+### Daily use and integrations
+
+- Keep the app running on the computer and Tailscale connected on both devices. Configure Windows sleep settings for the time you need remote access; the app does not change power settings for you.
+- Anki review requires **Anki desktop with AnkiConnect open on the computer**. Do not change AnkiConnect to the iPad's address or expose its port. Ollama also runs on the computer with its existing local address.
+- ChatGPT tutoring uses the computer's saved connection. Connecting, reconnecting, adding accounts, and granting plan permission must be done in Settings on the computer at its localhost address. On the iPad those sign-in actions are disabled with an explanation; reopen Settings after signing in on the computer. Model selection and tutor conversations still work remotely.
+- All authorized devices share the same database, settings, and Anki review session. This is still a personal app, not separate accounts or isolated workspaces for different people. The configured Tailscale login has full app access, including settings and deletions.
+- Keep the tailnet private and avoid sharing this computer with other accounts. Tailscale access-control rules also apply. The app additionally checks the exact Serve hostname and the `Tailscale-User-Login` identity header that Serve supplies. Public Funnel requests and other Tailscale accounts do not satisfy that check. Local programs on the computer remain trusted.
+- Tailscale HTTPS setup publishes the certificate hostname in public certificate-transparency logs; choose a computer name that does not reveal sensitive information. This does not make the app itself public.
+
+### Check or disable access
+
+```powershell
+tailscale serve status
+```
+
+Confirm it says the address is available **within your tailnet**, with `/` proxying to `http://127.0.0.1:3000`. To stop serving this HTTPS endpoint:
+
+```powershell
+tailscale serve --https=443 off
+```
+
+To disable remote access in the app too, remove **both** `TAILSCALE_ORIGIN` and `TAILSCALE_LOGIN` from `.env` and restart the app. Local access continues to work. Serve's `--bg` configuration persists, but the app itself still needs starting after a computer restart.
+
+If Safari cannot connect, check that the computer is awake, the app is running, both Tailscale clients are connected, and the Serve target matches `PORT`. For an **Access requires localhost or the configured Tailscale Serve connection and account** error, check the exact HTTPS hostname, the configured login, that the iPad is signed into that account and not tagged, and that you restarted the app after editing `.env`. Do not use the computer's LAN or `100.x` address in Safari.
+
+Reference: [Tailscale Serve setup and identity headers](https://tailscale.com/kb/1312/serve).
+
 ## Connect your tutor
 
 Open **Settings** in the app. Choose one provider:
@@ -108,7 +168,7 @@ data/uploads/           Original reference PDFs
 data/chatgpt/           Protected ChatGPT connections and installation identity
 ```
 
-Back up the whole `data` directory **with the app stopped**. It may include credentials; Windows-encrypted connections need the same Windows user to unlock, so sign in again when moving to another computer. Dependencies, local data, builds, and `.env` are ignored by Git. The server binds to `127.0.0.1` and rejects cross-origin API access, with a state-validated OAuth callback for top-level browser navigation. This is a personal desktop web app, not a public multi-user service; do not expose its port to the internet.
+Back up the whole `data` directory **with the app stopped**. It may include credentials; Windows-encrypted connections need the same Windows user to unlock, so sign in again when moving to another computer. Dependencies, local data, builds, and `.env` are ignored by Git. The server binds to `127.0.0.1` and rejects cross-origin API access, with a state-validated OAuth callback for top-level browser navigation. Optional remote access is restricted to a configured Tailscale Serve HTTPS hostname and login (see the iPad setup above); arbitrary forwarded headers are not trusted. This is a personal web app, not a public multi-user service; do not expose its port to the internet.
 
 The UI, storage, and provider adapters are separated so features such as audio practice, structured exercise tracking, and additional providers can be added later.
 

@@ -1,4 +1,5 @@
 import express from 'express';
+import { createAccessPolicy } from './access.js';
 import { generateListening } from './listening.js';
 import { TUTOR_LEVELS } from '../shared/tutor.js';
 import { parseExerciseContent, formatExerciseAnswers, practiceQuestionsPrompt } from '../shared/exercises.js';
@@ -15,25 +16,11 @@ const short = z.string().trim().min(1).max(160);
 const languageSchema = z.object({ name: short, nativeName: short, code: z.string().trim().min(2).max(3) });
 const sectionSchema = z.object({ id: short, title: short, startPage: z.number().int().min(1), endPage: z.number().int().min(1), depth: z.number().int().min(0).max(6), completed: z.boolean().default(false) });
 
-export function createApp(store, integrations, chatgpt = null) {
+export function createApp(store, integrations, chatgpt = null, access = {}) {
   integrations ??= makeIntegrations(fetch, chatgpt);
   const app = express();
   app.disable('x-powered-by');
-  app.use((req, res, next) => {
-    const host = req.headers.host || '';
-    if (!/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host)) return res.status(403).json({ error: 'This app is available only on localhost.' });
-    // OAuth returns through a top-level cross-site GET. API reads and mutations
-    // still require same-origin access; the callback validates its own state/cookie.
-    const protectedRoute = req.path.startsWith('/api/') || !['GET', 'HEAD'].includes(req.method);
-    if (protectedRoute && ((req.headers.origin && req.headers.origin !== `http://${host}`) || req.headers['sec-fetch-site'] === 'cross-site')) {
-      return res.status(403).json({ error: 'Cross-origin requests are not allowed.' });
-    }
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('X-Frame-Options', 'DENY');
-    if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
-    next();
-  });
+  app.use(createAccessPolicy(access));
   app.use(express.json({ limit: '1mb' }));
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024, files: 1 } });
   const requireLanguage = value => {
@@ -46,9 +33,9 @@ export function createApp(store, integrations, chatgpt = null) {
     if (!doc) throw new AppError(404, 'Reference not found.');
     return doc;
   };
-  const publicSettings = () => {
+  const publicSettings = req => {
     const { ankiKey, ...settings } = store.settings();
-    return { ...settings, hasAnkiKey: Boolean(ankiKey), chatgpt: chatgpt?.status() || { connected: false, sharing: false, profiles: [] } };
+    return { ...settings, hasAnkiKey: Boolean(ankiKey), chatgpt: { ...(chatgpt?.status() || { connected: false, sharing: false, profiles: [] }), signInAvailable: req.localAccess } };
   };
   const anki = (action, params) => integrations.anki(action, params, store.settings());
   async function reviewCard() {
@@ -110,7 +97,7 @@ export function createApp(store, integrations, chatgpt = null) {
       reviews: store.get("SELECT COUNT(*) AS count FROM activity WHERE languageId=? AND kind='review'", language.id).count,
       completed: store.all('SELECT sections FROM documents WHERE languageId=?', language.id).reduce((n, d) => n + JSON.parse(d.sections).filter(s => s.completed).length, 0),
     }));
-    res.json({ languages: summaries, settings: publicSettings(), activity: store.all('SELECT languageId, kind, createdAt FROM activity ORDER BY createdAt DESC LIMIT 500') });
+    res.json({ languages: summaries, settings: publicSettings(req), activity: store.all('SELECT languageId, kind, createdAt FROM activity ORDER BY createdAt DESC LIMIT 500') });
   });
   app.post('/api/languages', (req, res) => {
     const data = languageSchema.parse(req.body);
@@ -119,7 +106,7 @@ export function createApp(store, integrations, chatgpt = null) {
     store.run('INSERT INTO languages (id, name, nativeName, code) VALUES (?, ?, ?, ?)', languageId, data.name, data.nativeName, data.code.toUpperCase());
     res.status(201).json({ id: languageId, ...data });
   });
-  app.get('/api/settings', (req, res) => res.json(publicSettings()));
+  app.get('/api/settings', (req, res) => res.json(publicSettings(req)));
   app.put('/api/settings', (req, res) => {
     const data = z.object({
       provider: z.enum(['chatgpt', 'ollama']), chatgptModel: z.string().trim().max(160).default(''), ollamaModel: short, ollamaUrl: short,
@@ -131,10 +118,16 @@ export function createApp(store, integrations, chatgpt = null) {
     store.saveSettings({ ...previous, ...values,
       ankiKey: clearAnkiKey ? '' : data.ankiKey?.trim() || previous.ankiKey,
     });
-    res.json(publicSettings());
+    res.json(publicSettings(req));
   });
 
   const requireChatGPT = () => { if (!chatgpt) throw new AppError(503, 'ChatGPT sign-in is not available. Restart the app.'); return chatgpt; };
+  // OpenAI's loopback redirect points at the browser's device, not our proxy.
+  // Existing server-side connections can still be used by the iPad.
+  app.use(['/api/chatgpt/sign-in', '/auth/chatgpt/start', '/auth/callback'], (req, res, next) => {
+    if (!req.localAccess) return res.status(403).json({ error: 'Connect ChatGPT on the computer running the app using its localhost address, then reopen Settings on the iPad.' });
+    next();
+  });
   app.post('/api/chatgpt/sign-in', (req, res) => {
     const body = z.object({ profileId: short.optional(), newProfile: z.boolean().optional(), enablePlan: z.boolean().optional() }).parse(req.body);
     const port = req.socket.localPort;
@@ -168,15 +161,15 @@ export function createApp(store, integrations, chatgpt = null) {
     const { profileId } = z.object({ profileId: short }).parse(req.body);
     await requireChatGPT().select(profileId);
     store.saveSettings({ ...store.settings(), provider: 'chatgpt', chatgptModel: '' });
-    res.json(publicSettings());
+    res.json(publicSettings(req));
   });
   app.post('/api/chatgpt/sign-out', async (req, res) => {
     const { profileId } = z.object({ profileId: short.optional() }).parse(req.body);
     const result = await requireChatGPT().signOut(profileId);
-    res.json({ ...publicSettings(), warning: result.warning });
+    res.json({ ...publicSettings(req), warning: result.warning });
   });
-  app.post('/api/chatgpt/resume', (req, res) => { requireChatGPT().resume(); res.json(publicSettings()); });
-  app.post('/api/chatgpt/welcome', async (req, res) => { await requireChatGPT().acknowledgeWelcome(); res.json(publicSettings()); });
+  app.post('/api/chatgpt/resume', (req, res) => { requireChatGPT().resume(); res.json(publicSettings(req)); });
+  app.post('/api/chatgpt/welcome', async (req, res) => { await requireChatGPT().acknowledgeWelcome(); res.json(publicSettings(req)); });
 
   app.get('/api/languages/:id/documents', (req, res) => {
     requireLanguage(req.params.id);

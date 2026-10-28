@@ -9,7 +9,8 @@ import { createChatGPT } from './chatgpt.js';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const store = createStore(path.join(root, 'data'));
 const chatgpt = await createChatGPT(path.join(root, 'data'));
-const app = createApp(store, undefined, chatgpt);
+const access = { tailscaleOrigin: process.env.TAILSCALE_ORIGIN || '', tailscaleLogin: process.env.TAILSCALE_LOGIN || '' };
+const app = createApp(store, undefined, chatgpt, access);
 const dev = process.argv.includes('--dev');
 let vite;
 if (dev) {
@@ -25,7 +26,11 @@ if (dev) {
   app.get('/{*path}', (req, res) => res.sendFile(path.join(root, 'dist', 'index.html')));
 }
 const port = Number(process.env.PORT || 3000);
-const server = app.listen(port, '127.0.0.1', () => console.log(`\n  Mallick Diller is ready at http://127.0.0.1:${port}\n  Your data is saved in ${path.join(root, 'data')}\n`));
+// Keep this loopback-only: Tailscale Serve is the authenticated HTTPS boundary.
+const server = app.listen(port, '127.0.0.1', () => {
+  console.log(`\n  Mallick Diller is ready at http://127.0.0.1:${port}\n  Your data is saved in ${path.join(root, 'data')}\n`);
+  if (access.tailscaleOrigin) console.log(`  Tailscale access configured: ${access.tailscaleOrigin}\n  Start Tailscale Serve separately; see README.md.\n`);
+});
 server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `Port ${port} is in use. Set PORT in .env to another port.` : error); process.exit(1); });
 async function close() { chatgpt.close(); await vite?.close(); server.close(() => { store.db.close(); process.exit(0); }); }
 process.on('SIGINT', close);
