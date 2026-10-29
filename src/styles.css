@@ -291,6 +291,13 @@ summary { cursor: pointer; min-height: 44px; padding: 12px 0; }
 .tutor-settings { grid-column: 2; grid-row: 1; min-width: 0; }
 .tutor-settings h2 { font-size: 16px; margin-bottom: 12px; }
 .tutor-settings label { display: flex; flex-direction: column; gap: 8px; margin: 24px 0; font-size: 14px; }
+.dictionary-hint { padding: 12px 24px 0; }
+.dictionary-word { display: inline; padding: 0; margin: 0; border: 0; border-radius: 0; background: none; color: inherit; font: inherit; line-height: inherit; text-align: inherit; text-decoration: underline dotted var(--line); text-underline-offset: 3px; }
+.dictionary-word:hover { color: var(--green); text-decoration-color: currentColor; }
+.dictionary-definitions { margin: 24px 0; padding-left: 24px; }
+.dictionary-definitions li + li { margin-top: 20px; }
+.dictionary-dialog p { overflow-wrap: anywhere; }
+.dictionary-sources { display: flex; flex-wrap: wrap; gap: 12px 20px; margin-top: 24px; }
 .tutor-settings textarea { width: 100%; min-height: 240px; resize: vertical; border: 1px solid var(--line); border-radius: 4px; background: var(--control); padding: 12px; line-height: 1.6; }
 .tutor-settings-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
 @media (max-width: 1200px) {

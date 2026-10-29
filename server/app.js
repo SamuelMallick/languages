@@ -1,7 +1,8 @@
 import express from 'express';
+import { createDictionaryLookup } from './dictionary.js';
 import { createAccessPolicy } from './access.js';
 import { generateListening } from './listening.js';
-import { TUTOR_LEVELS } from '../shared/tutor.js';
+import { DEFAULT_TUTOR_INSTRUCTIONS, TUTOR_LEVELS } from '../shared/tutor.js';
 import { parseExerciseContent, formatExerciseAnswers, practiceQuestionsPrompt } from '../shared/exercises.js';
 import { cardAudioFiles } from './anki-audio.js';
 import { withoutDesktopAudio } from './anki-playback.js';
@@ -17,7 +18,7 @@ const short = z.string().trim().min(1).max(160);
 const languageSchema = z.object({ name: short, nativeName: short, code: z.string().trim().min(2).max(3) });
 const sectionSchema = z.object({ id: short, title: short, startPage: z.number().int().min(1), endPage: z.number().int().min(1), depth: z.number().int().min(0).max(6), completed: z.boolean().default(false) });
 
-export function createApp(store, integrations, chatgpt = null, access = {}) {
+export function createApp(store, integrations, chatgpt = null, access = {}, dictionaryLookup = createDictionaryLookup()) {
   integrations ??= makeIntegrations(fetch, chatgpt);
   const app = express();
   app.disable('x-powered-by');
@@ -317,6 +318,10 @@ export function createApp(store, integrations, chatgpt = null, access = {}) {
     res.type(extension).send(Buffer.from(data, 'base64'));
   });
 
+  app.get('/api/dictionary/nl/:word', async (req, res) => {
+    res.json(await dictionaryLookup(req.params.word));
+  });
+
   app.get('/api/languages/:id/chats', (req, res) => {
     requireLanguage(req.params.id);
     res.json(store.all('SELECT id, title, updatedAt FROM chats WHERE languageId=? AND documentId IS NULL ORDER BY updatedAt DESC', req.params.id));
@@ -334,7 +339,8 @@ export function createApp(store, integrations, chatgpt = null, access = {}) {
       title = section.title;
     } else if (data.sectionId) throw new AppError(400, 'A grammar section requires a reference.');
     const chatId = id();
-    store.run('INSERT INTO chats (id, languageId, documentId, sectionId, title, messages, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)', chatId, data.languageId, data.documentId || null, data.sectionId || null, title, '[]', new Date().toISOString());
+    const tutorInstructions = data.documentId ? null : store.get('SELECT tutorInstructions FROM practice_defaults WHERE languageId=?', data.languageId)?.tutorInstructions ?? DEFAULT_TUTOR_INSTRUCTIONS;
+    store.run('INSERT INTO chats (id, languageId, documentId, sectionId, title, messages, updatedAt, tutorInstructions) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', chatId, data.languageId, data.documentId || null, data.sectionId || null, title, '[]', new Date().toISOString(), tutorInstructions);
     res.status(201).json(chatView(store.get('SELECT * FROM chats WHERE id=?', chatId)));
   });
   app.post('/api/languages/:id/listening', async (req, res) => {
@@ -352,11 +358,14 @@ export function createApp(store, integrations, chatgpt = null, access = {}) {
     res.json(chatView(chat));
   });
   app.patch('/api/chats/:id/tutor', (req, res) => {
-    const data = z.object({ tutorInstructions: z.string().trim().max(8000), tutorLevel: z.enum(TUTOR_LEVELS) }).strict().parse(req.body);
+    const data = z.object({ tutorInstructions: z.string().trim().max(8000), tutorLevel: z.enum(TUTOR_LEVELS), saveAsDefault: z.boolean().optional() }).strict().parse(req.body);
     const chat = store.get('SELECT * FROM chats WHERE id=?', req.params.id);
     if (!chat) throw new AppError(404, 'Conversation not found.');
     if (chat.documentId) throw new AppError(400, 'Tutor settings are only available for practice conversations.');
     if (activeChats.has(chat.id)) throw new AppError(409, 'Wait for the tutor to finish before changing instructions.');
+    if (data.saveAsDefault) {
+      store.run('INSERT INTO practice_defaults (languageId, tutorInstructions) VALUES (?, ?) ON CONFLICT(languageId) DO UPDATE SET tutorInstructions=excluded.tutorInstructions', chat.languageId, data.tutorInstructions);
+    }
     store.run('UPDATE chats SET tutorInstructions=?, tutorLevel=? WHERE id=?', data.tutorInstructions, data.tutorLevel, chat.id);
     res.json(chatView(store.get('SELECT * FROM chats WHERE id=?', chat.id)));
   });

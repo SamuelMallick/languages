@@ -1,5 +1,5 @@
 import { useContext, useEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
+import { ChatMarkdown, DictionaryProvider } from './Dictionary.jsx';
 import { ArrowUp, LoaderCircle } from 'lucide-react';
 import { api, ErrorNotice, ExternalLink } from './ui.jsx';
 import { TutorContext } from './tutor-context.js';
@@ -17,10 +17,10 @@ export default function Chat({ initial, language, grammar = false, tutorReady, o
   const [saving, setSaving] = useState(false);
   const [tutorError, setTutorError] = useState('');
   const dirty = instructions !== (chat.tutorInstructions ?? DEFAULT_TUTOR_INSTRUCTIONS) || level !== (chat.tutorLevel || '');
-  async function saveTutor(e) {
+  async function saveTutor(e, saveAsDefault = false) {
     e.preventDefault(); setSaving(true); setTutorError('');
     try {
-      const next = await api(`/chats/${chat.id}/tutor`, { method: 'PATCH', body: { tutorInstructions: instructions, tutorLevel: level } });
+      const next = await api(`/chats/${chat.id}/tutor`, { method: 'PATCH', body: { tutorInstructions: instructions, tutorLevel: level, saveAsDefault } });
       setChat(next); setInstructions(next.tutorInstructions); setLevel(next.tutorLevel);
     } catch (e) { setTutorError(e.message); }
     finally { setSaving(false); }
@@ -47,17 +47,19 @@ export default function Chat({ initial, language, grammar = false, tutorReady, o
     { label: 'Ordering at a café', prompt: `Let’s role-play ordering at a café in ${language.name}. You are the barista. Help when I get stuck.` },
     { label: 'Describe my day', prompt: `Help me describe my day in ${language.name}. Ask me one short question at a time and gently correct my answers.` },
   ];
-  return <div className={grammar ? '' : 'chat-workspace'}>{!grammar && <aside className="tutor-settings"><form onSubmit={saveTutor}>
+  const dictionaryEnabled = !grammar && language.code?.toUpperCase() === 'NL';
+  return <DictionaryProvider enabled={dictionaryEnabled}><div className={grammar ? '' : 'chat-workspace'}>{!grammar && <aside className="tutor-settings"><form onSubmit={saveTutor}>
     <h2>Tutor settings</h2>
     <p className="small muted">Saved for this conversation. Changes apply to the next reply.</p>
     <label>Language level<select value={level} disabled={busy || saving} onChange={e => setLevel(e.target.value)}>{TUTOR_LEVELS.map(value => <option key={value} value={value}>{value || 'Adapt to my responses'}</option>)}</select></label>
     <label>Instructions<textarea rows={12} maxLength={8000} value={instructions} disabled={busy || saving} onChange={e => setInstructions(e.target.value)} /></label>
     <ErrorNotice error={tutorError} onClose={() => setTutorError('')} />
-    <div className="tutor-settings-actions"><button className="button primary" disabled={busy || saving || !dirty}>{saving ? 'Saving…' : 'Save'}</button><button type="button" className="text-button" disabled={busy || saving} onClick={() => { setInstructions(DEFAULT_TUTOR_INSTRUCTIONS); setLevel(''); setTutorError(''); }}>Reset to defaults</button></div>
+    <div className="tutor-settings-actions"><button className="button primary" disabled={busy || saving || !dirty}>{saving ? 'Saving…' : 'Save'}</button><button type="button" className="text-button" disabled={busy || saving} title={`Save instructions for this chat and new chats in ${language.name}`} onClick={e => saveTutor(e, true)}>Set to default</button><button type="button" className="text-button" disabled={busy || saving} onClick={() => { setInstructions(DEFAULT_TUTOR_INSTRUCTIONS); setLevel(''); setTutorError(''); }}>Reset to defaults</button></div>
     {dirty && <p className="small muted" role="status">Unsaved changes</p>}
   </form></aside>}<div className={`chat-panel ${grammar ? `grammar-chat ${!chat.messages.length && !busy ? 'empty-discussion' : ''}` : ''}`}><header className="chat-header"><div><strong>{grammar ? 'Section discussion' : 'Conversation'}</strong><small>{language.name}</small></div></header>
+    {dictionaryEnabled && <p className="dictionary-hint small muted">Click a word for its English definition. Only that word is shared with FreeDictionaryAPI.com.</p>}
     <div className="grammar-actions">{(grammar ? starters : [{ label: 'Generate practice questions', action: 'generate-practice' }]).map(({ label, prompt, action }) => <button className="button secondary small-button" key={label} disabled={busy || saving} onClick={() => send(prompt || '', undefined, action)}>{label}</button>)}</div>
-    <div className="chat-messages" aria-live="polite" aria-busy={busy}>{!grammar && !chat.messages.length && !busy ? <div className="chat-welcome"><div className="chat-starters">{starters.map(({ label, prompt }) => <button key={label} onClick={() => send(prompt)}>{label}</button>)}</div></div> : <>{chat.messages.filter(message => !isInternalExerciseMessage(message, language, grammar)).map(message => <div key={message.id} className={`message ${message.role}`}><div className="message-body"><span className="message-author">{message.role === 'assistant' ? 'Mallick Diller tutor' : 'You'}</span>{message.role === 'assistant' ? <ExerciseMessage message={message} submittedAnswers={chat.messages.filter(reply => reply.role === 'user' && reply.exercise?.messageId === message.id).at(-1)?.exercise.answers} disabled={busy || saving} onSubmit={submitAnswers} /> : <ReactMarkdown>{message.content}</ReactMarkdown>}</div></div>)}{busy && <>{pending && <div className="message user"><div className="message-body"><span className="message-author">You</span><p>{pending}</p></div></div>}<div className="message assistant"><div className="thinking" role="status">Thinking…</div></div></>}</>}<div ref={end} /></div>
+    <div className="chat-messages" aria-live="polite" aria-busy={busy}>{!grammar && !chat.messages.length && !busy ? <div className="chat-welcome"><div className="chat-starters">{starters.map(({ label, prompt }) => <button key={label} onClick={() => send(prompt)}>{label}</button>)}</div></div> : <>{chat.messages.filter(message => !isInternalExerciseMessage(message, language, grammar)).map(message => <div key={message.id} className={`message ${message.role}`}><div className="message-body"><span className="message-author">{message.role === 'assistant' ? 'Mallick Diller tutor' : 'You'}</span>{message.role === 'assistant' ? <ExerciseMessage message={message} submittedAnswers={chat.messages.filter(reply => reply.role === 'user' && reply.exercise?.messageId === message.id).at(-1)?.exercise.answers} disabled={busy || saving} onSubmit={submitAnswers} /> : <ChatMarkdown>{message.content}</ChatMarkdown>}</div></div>)}{busy && <>{pending && <div className="message user"><div className="message-body"><span className="message-author">You</span><p>{pending}</p></div></div>}<div className="message assistant"><div className="thinking" role="status">Thinking…</div></div></>}</>}<div ref={end} /></div>
     <div className="chat-bottom">{settings?.provider === 'chatgpt' && <div className={`chat-plan-status ${settings.chatgpt?.usageBlocked ? 'plan-paused' : ''}`}><span>{settings.chatgpt?.usageBlocked ? 'ChatGPT plan usage paused' : settings.chatgpt?.sharing ? 'Using ChatGPT plan' : 'Connect your ChatGPT plan'}</span><ExternalLink href="https://chatgpt.com/settings/usage">Manage usage</ExternalLink></div>}<ErrorNotice error={error} onClose={() => setError('')} />{(chat.contextTruncated || chat.historyTruncated) && <p className="small muted">{chat.contextTruncated ? 'This section is long; the tutor received its first 32,000 characters. Use smaller page ranges for full coverage. ' : ''}{chat.historyTruncated ? 'The tutor received recent messages; your full conversation is still saved.' : ''}</p>}{!tutorReady && <div className="tutor-connect"><span>Connect a tutor to send messages.</span><button onClick={onSettings}>Set up<ArrowUp size={13} className="diagonal" /></button></div>}<form className="composer" onSubmit={e => { e.preventDefault(); send(); }}><textarea ref={input} rows={2} maxLength={8000} disabled={busy} value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }} placeholder={grammar ? 'Ask about this chapter…' : `Message in ${language.name}…`} aria-label="Message your tutor" /><button className="send-button" disabled={busy || !text.trim()} aria-label="Send message">{busy ? <LoaderCircle size={19} className="spin" /> : <ArrowUp size={20} />}</button></form><p className="composer-hint">{grammar ? 'The selected section accompanies each message.' : ''} <span>AI can make mistakes.</span></p></div>
-  </div></div>;
+  </div></div></DictionaryProvider>;
 }

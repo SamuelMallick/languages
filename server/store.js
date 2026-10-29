@@ -42,6 +42,10 @@ export function createStore(directory) {
       createdAt TEXT NOT NULL, UNIQUE(languageId, normalized)
     );
     CREATE INDEX IF NOT EXISTS listening_recent ON listening_history(languageId, id DESC);
+    CREATE TABLE IF NOT EXISTS practice_defaults (
+      languageId TEXT PRIMARY KEY REFERENCES languages(id) ON DELETE CASCADE,
+      tutorInstructions TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
   const chatColumns = db.prepare('PRAGMA table_info(chats)').all();

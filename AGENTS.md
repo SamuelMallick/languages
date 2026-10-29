@@ -1,3 +1,12 @@
+# Change approval
+
+These rules apply to all work in this repository, not only UI work.
+
+- Default to investigation and discussion only. Do not modify, create, or delete files until the user explicitly instructs you to make changes.
+- A reported bug, description of desired behavior, or question is not permission to implement a change. Explain the proposed fix and wait for explicit approval.
+- When changes are explicitly authorized, keep them within the approved scope. Ask before making additional changes.
+- Rebuild the app after every task that changes files, before reporting completion. No separate build approval is required.
+
 # UI design guidance
 
 These instructions apply to UI work throughout this repository. Preserve app functionality unless the requested change explicitly alters it.
@@ -69,7 +78,7 @@ The existing UI is not a style reference to preserve. Its promotional copy, deco
   3. Is there generous spacing and a clear visual hierarchy?
   4. Are errors, empty/loading states, keyboard navigation, and small-screen layouts still usable?
 - rebuild the app after every completed task.
-- Do not modify any files or implement any changes until told to explicitely. If the user expresses what they want, tell them how you would do it. Only make changes once you are told to explicitely.
+- only build once you are told to explicitely.
 
 When in doubt, choose the simpler, quieter version. Do not replace removed marketing copy with different marketing copy.
 

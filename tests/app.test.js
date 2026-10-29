@@ -11,10 +11,10 @@ import { createApp } from '../server/app.js';
 import { makeIntegrations, validateLocalUrl, AppError } from '../server/integrations.js';
 import { assignRanges, extractPdf, sectionContext } from '../server/pdf.js';
 
-async function fixture(t, integrations) {
+async function fixture(t, integrations, dictionaryLookup) {
   const directory = mkdtempSync(path.join(tmpdir(), 'lingua-test-'));
   const store = createStore(directory);
-  const server = createApp(store, integrations).listen(0, '127.0.0.1');
+  const server = createApp(store, integrations, null, {}, dictionaryLookup).listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => {
@@ -95,6 +95,41 @@ test('listening generation provider failures can be retried', async t => {
   assert.equal((await request(route, { method: 'POST', body })).status, 503);
   fail = false;
   assert.equal((await request(route, { method: 'POST', body })).data.translation, 'Hello.');
+});
+
+test('dictionary route returns definitions without sending chat data', async t => {
+  const calls = [];
+  const result = { word: 'boek', definitions: [{ partOfSpeech: 'noun', definition: 'a book' }], sourceUrl: 'https://en.wiktionary.org/wiki/boek' };
+  const { request } = await fixture(t, {}, async word => { calls.push(word); return result; });
+  const response = await request('/dictionary/nl/boek');
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.data, result);
+  assert.deepEqual(calls, ['boek']);
+  assert.equal((await request('/dictionary/tr/boek')).status, 404);
+});
+
+test('practice instruction defaults apply only to future chats in the same language', async t => {
+  const { request, store } = await fixture(t, {});
+  const createChat = async (languageId = 'dutch') => (await request('/chats', { method: 'POST', body: { languageId } })).data;
+  const existing = await createChat();
+  const current = await createChat();
+  const instructions = 'Speak Dutch and explain corrections in English.';
+  const save = body => request(`/chats/${current.id}/tutor`, { method: 'PATCH', body });
+  const saved = await save({ tutorInstructions: instructions, tutorLevel: 'A2', saveAsDefault: true });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.tutorInstructions, instructions);
+  assert.equal(store.get('SELECT tutorInstructions FROM practice_defaults WHERE languageId=?', 'dutch').tutorInstructions, instructions);
+  const next = await createChat();
+  assert.equal(next.tutorInstructions, instructions);
+  assert.equal(next.tutorLevel, '');
+  assert.equal((await request(`/chats/${existing.id}`)).data.tutorInstructions, existing.tutorInstructions);
+  assert.equal((await createChat('turkish')).tutorInstructions, existing.tutorInstructions);
+  await save({ tutorInstructions: 'Only for this conversation.', tutorLevel: '' });
+  assert.equal((await createChat()).tutorInstructions, instructions);
+  assert.equal((await save({ tutorInstructions: instructions, tutorLevel: '', saveAsDefault: 'yes' })).status, 400);
+  // An explicitly blank default is preserved rather than replaced by built-in instructions.
+  await save({ tutorInstructions: '', tutorLevel: '', saveAsDefault: true });
+  assert.equal((await createChat()).tutorInstructions, '');
 });
 
 test('per-conversation tutor settings persist, validate, and reach both providers', async t => {
